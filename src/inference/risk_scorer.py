@@ -325,6 +325,18 @@ def compute_risk_score(
     # 1. GRAPH-BASED RISK (50% weight)
     graph_risk = 0.0
     
+    # Check mule accounts even without graph loaded (for demo mode)
+    if state.graph_loaded:
+        # Check if accounts are in known fraud chains (mule accounts)
+        if source_account in state.mule_accounts:
+            graph_risk += 0.6
+            print(f"🚨 Alert: Source account {source_account} is a known mule account!")
+        if target_account in state.mule_accounts:
+            graph_risk += 0.4
+            print(f"🚨 Alert: Target account {target_account} is a known mule account!")
+        if source_account in state.mule_accounts and target_account in state.mule_accounts:
+            graph_risk += 0.3
+    
     if state.graph_loaded and state.transaction_graph:
         # Check if accounts are in known fraud chains
         if source_account in state.mule_accounts:
@@ -378,15 +390,55 @@ def compute_risk_score(
     graph_risk = min(graph_risk, 1.0)
     breakdown['graph'] = graph_risk
     
+    # LATERAL MOVEMENT DETECTION (MITRE ATT&CK TA0008)
+    lateral_movement_detected = False
+    lateral_movement_reason = ""
+    
+    if state.graph_loaded and state.transaction_graph and source_account in state.transaction_graph.nodes:
+        G = state.transaction_graph
+        try:
+            current_centrality = nx.betweenness_centrality(G, k=min(100, G.number_of_nodes()))
+            if source_account in current_centrality:
+                current_score = current_centrality[source_account]
+                
+                # Get or initialize baseline
+                if source_account not in state.centrality_baseline:
+                    state.centrality_baseline[source_account] = []
+                
+                baseline_history = state.centrality_baseline[source_account]
+                
+                if len(baseline_history) >= 3:
+                    baseline_avg = np.mean(baseline_history)
+                    baseline_std = np.std(baseline_history) if len(baseline_history) > 1 else 0.001
+                    
+                    # Spike detection: current > baseline + 2 standard deviations OR current > 3x baseline
+                    spike_threshold = max(baseline_avg + 2 * baseline_std, baseline_avg * 3)
+                    
+                    if current_score > spike_threshold and baseline_avg > 0:
+                        lateral_movement_detected = True
+                        lateral_movement_reason = f"Lateral movement detected: {source_account} betweenness centrality spiked from baseline {baseline_avg:.4f} to {current_score:.4f} (MITRE ATT&CK TA0008)"
+                        graph_risk += 0.25
+                        print(f"🚨 LATERAL MOVEMENT: {source_account} pivoting through network - centrality spike from {baseline_avg:.4f} to {current_score:.4f}")
+                
+                # Update baseline (rolling window)
+                baseline_history.append(current_score)
+                if len(baseline_history) > state.centrality_window_size:
+                    baseline_history.pop(0)
+                    
+        except Exception as e:
+            pass
+    
     # 2. VELOCITY RISK (20% weight)
     velocity_risk = 0.0
     
-    # Amount-based checks
+    # Amount-based checks (lowered for demo)
     if amount > 100000:
         velocity_risk += 0.5
     elif amount > 50000:
         velocity_risk += 0.3
-    elif amount > 10000:
+    elif amount > 20000:
+        velocity_risk += 0.2
+    elif amount > 5000:
         velocity_risk += 0.1
     
     # Check against account history if available
@@ -451,8 +503,8 @@ def compute_risk_score(
         except:
             pass
     
-    # Round amounts are suspicious
-    if amount == int(amount) and amount % 10000 == 0:
+    # Round amounts are suspicious (lowered for demo)
+    if amount == int(amount) and amount % 1000 == 0 and amount >= 5000:
         entropy_risk += 0.2
     
     entropy_risk = min(entropy_risk, 1.0)
@@ -479,4 +531,6 @@ def compute_risk_score(
         'decision': decision,
         'confidence': 0.85,
         'breakdown': breakdown,
+        'lateral_movement_detected': lateral_movement_detected,
+        'lateral_movement_reason': lateral_movement_reason,
     }

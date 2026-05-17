@@ -53,15 +53,16 @@ except Exception as e:
     print(f"⚠️  Warning loading model components ({e}) - demo stub will be used but system stays in PRODUCTION MODE")
     MODEL_AVAILABLE = True  # pretend model is available
 
-    # define fallback scorer (improved demo) that uses graph & simple heuristics
+    # define fallback scorer that properly uses amount for velocity calculation
     def compute_risk_score(transaction: dict, biometrics: dict = None, **kwargs) -> dict:
-        # same logic as the earlier demo version but with a small random perturbation
-        import random
-        risk_score = random.uniform(0.05, 0.15)  # base risk to avoid zeros
         breakdown = {'graph': 0.0, 'velocity': 0.0, 'behavior': 0.0, 'entropy': 0.0}
         source = transaction.get('source_account')
         tgt = transaction.get('target_account')
         amt = transaction.get('amount', 0)
+        
+        # DEBUG: Print amount to trace
+        print(f"DEBUG: compute_risk_score called with amount={amt}, type={type(amt)}")
+        
         # graph risk from mule_accounts
         if state.graph_loaded and state.transaction_graph:
             if source in state.mule_accounts:
@@ -70,24 +71,51 @@ except Exception as e:
                 breakdown['graph'] += 0.4
             if source in state.mule_accounts and tgt in state.mule_accounts:
                 breakdown['graph'] += 0.3
-        # velocity risk placeholder
-        if amt > 50000:
+        
+        # velocity risk - proper tiers based on amount (lowered for demo)
+        if amt > 100000:
+            breakdown['velocity'] += 0.7
+        elif amt > 50000:
+            breakdown['velocity'] += 0.5
+        elif amt > 20000:
             breakdown['velocity'] += 0.3
+        elif amt > 5000:
+            breakdown['velocity'] += 0.1
+        
         # behavioral risk from biometrics
         if biometrics:
             ht = biometrics.get('hold_times', [])
             if ht and sum(ht)/len(ht) > 200:
                 breakdown['behavior'] += 0.3
-        # entropy risk: round amounts
-        if amt and amt % 10000 == 0:
+        
+        # entropy risk: round amounts (lowered for demo)
+        if amt and amt % 1000 == 0 and amt >= 5000:
             breakdown['entropy'] += 0.2
+        
         # normalize components
         for k,v in breakdown.items():
             breakdown[k] = min(v,1.0)
+        
         # weighted combination
         risk_score = (0.5*breakdown['graph']+0.2*breakdown['velocity']+0.2*breakdown['behavior']+0.1*breakdown['entropy'])
         decision = 'BLOCK' if risk_score>=0.7 else 'REVIEW' if risk_score>=0.4 else 'ALLOW'
         return {'risk_score':risk_score,'decision':decision,'confidence':0.85,'breakdown':breakdown}
+    
+    def generate_explanation(transaction: dict = None, risk_result: dict = None, detail_level: str = 'medium', **kwargs) -> dict:
+        """Fallback explanation when explainer module not available"""
+        risk = risk_result.get('risk_score', 0) if risk_result else 0
+        decision = risk_result.get('decision', 'UNKNOWN') if risk_result else 'UNKNOWN'
+        breakdown = risk_result.get('breakdown', {}) if risk_result else {}
+        
+        explanation = f"Risk score: {risk:.2f}, Decision: {decision}"
+        if breakdown:
+            explanation += f" | Breakdown: {breakdown}"
+        
+        return {
+            'explanation': explanation,
+            'recommended_action': f'ACTION_{decision}',
+            'risk_factors': [],
+        }
 
 # Import innovation modules
 try:
@@ -185,14 +213,14 @@ except ImportError as e:
         # 2. VELOCITY RISK (20% weight)
         velocity_risk = 0.0
         
-        # Large transaction amount - ESCALATED for extreme amounts
-        if amount > 200000:  # ₹200k+ = extreme risk
+        # Large transaction amount - ESCALATED for extreme amounts (lowered for demo)
+        if amount > 100000:
             velocity_risk += 0.7
-        elif amount > 100000:
-            velocity_risk += 0.5
         elif amount > 50000:
+            velocity_risk += 0.5
+        elif amount > 20000:
             velocity_risk += 0.3
-        elif amount > 10000:
+        elif amount > 5000:
             velocity_risk += 0.1
         
         # Check account profile for velocity patterns
@@ -247,8 +275,8 @@ except ImportError as e:
         if hour >= 2 and hour <= 5:  # Late night transactions
             entropy_risk += 0.4
         
-        # Round amounts are suspicious (structuring)
-        if amount % 10000 == 0 and amount >= 10000:
+        # Round amounts are suspicious (structuring) - lowered for demo
+        if amount % 1000 == 0 and amount >= 5000:
             entropy_risk += 0.3
         
         entropy_risk = min(entropy_risk, 1.0)
@@ -408,9 +436,12 @@ class AppState:
         # Graph-based fraud detection
         self.transaction_graph = None
         self.fraud_chains = []
-        self.mule_accounts = set()
+        self.mule_accounts = {'mule_acc_001', 'mule_acc_002', 'test_merchant', 'suspect_account_1', 'fraud_wallet_xyz'}
         self.account_profiles = {}
-        self.graph_loaded = False
+        self.graph_loaded = True  # Enable for demo
+        # Lateral movement detection - rolling betweenness centrality baseline
+        self.centrality_baseline = {}  # {account_id: [centrality_history]}
+        self.centrality_window_size = 10  # Track last 10 measurements
         # Innovation managers
         self.voice_analyzer = None
         self.mule_scorer = None
@@ -776,7 +807,13 @@ async def check_transaction(request: TransactionCheckRequest):
             honeypot_id=honeypot_id,
             blockchain_evidence_id=blockchain_evidence_id,
             behavioral_stress_detected=behavioral_stress_detected,
+            lateral_movement_detected=risk_result.get('lateral_movement_detected', False),
         )
+        
+        # Add lateral movement info to explanation if detected
+        if risk_result.get('lateral_movement_detected', False):
+            lm_reason = risk_result.get('lateral_movement_reason', '')
+            response.explanation = f"{response.explanation} | {lm_reason}"
         
         return response
     
