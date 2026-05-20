@@ -289,7 +289,7 @@ pytest --cov=src tests/
 
 ```bash
 # Build Docker image
-docker build -t aegisgraph-sentinel:2.0 -f docker/Dockerfile .
+docker build -t aegisgraph-sentinel:2.0 .
 
 # Run container
 docker run -p 8000:8000 aegisgraph-sentinel:2.0
