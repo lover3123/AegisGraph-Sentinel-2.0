@@ -197,15 +197,6 @@ curl -X POST http://localhost:8000/api/v1/fraud/check \
   -d '{"transaction_id":"TXN_001","source_account":"ACC_123", ...}'
 ```
 
-### Option 3: Deploy with Docker
-```bash
-docker-compose up -d
-
-# Brings up:
-# - API service (port 8000)
-# - Neo4j database (port 7687)
-# - Redis cache (port 6379)
-```
 
 ---
 
@@ -281,7 +272,6 @@ final_score = (
 | Working Example | ✅ | End-to-end pipeline executable |
 | Code Quality | ✅ | Production-grade Python |
 | Testing | ⚠️ | Framework in place, needs coverage |
-| Docker | ⚠️ | Dockerfile ready, needs testing |
 | Monitoring | ⚠️ | Prometheus config ready, needs wiring |
 | CI/CD | ○ | Templates available |
 
@@ -417,8 +407,7 @@ See full troubleshooting in RESEARCH_AND_BEST_PRACTICES.md Part 7.
    - Test scoring endpoint
 
 4. **Deploy** (2 hours)
-   - Build Docker image
-   - Test with docker-compose
+   - Deploy API server
    - Monitor metrics
 
 5. **Production Retraining** (ongoing)
@@ -442,7 +431,7 @@ See full troubleshooting in RESEARCH_AND_BEST_PRACTICES.md Part 7.
 **What You Can Do Now:**
 1. Train HTGNN on your fraud data
 2. Integrate into FastAPI for real-time scoring
-3. Deploy with Docker to production
+3. Deploy API server to production
 4. Monitor and retrain weekly
 5. Explain every fraud decision to customers
 

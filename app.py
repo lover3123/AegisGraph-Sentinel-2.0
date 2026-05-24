@@ -4,6 +4,8 @@ Real-time Fraud Detection Interface
 """
 # Updated: May 17, 2026
 
+import logging
+logger = logging.getLogger(__name__)
 import streamlit as st
 import requests
 import json
@@ -12,6 +14,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime, timedelta
+from datetime import timezone
 import time #ready to deploy
 
 # Page configuration
@@ -22,37 +25,131 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+import os
+
 # API Configuration
-API_URL = "http://localhost:8080"
+API_URL = os.getenv("API_URL", "http://localhost:8000")
 
 # Custom CSS
 st.markdown("""
     <style>
+    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap');
+    
+    /* Global Styling */
+    html, body, [class*="css"] {
+        font-family: 'Plus Jakarta Sans', sans-serif !important;
+    }
+    
     .main-header {
-        font-size: 3rem;
-        font-weight: bold;
+        font-size: 3.5rem;
+        font-weight: 800;
         text-align: center;
-        color: #1f77b4;
-        padding: 20px;
-        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+        background: linear-gradient(135deg, #2dd4bf 0%, #0f766e 50%, #f59e0b 100%);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
+        padding: 10px 0;
+        margin-bottom: 2px;
+        letter-spacing: -0.04em;
+        text-shadow: 0 10px 30px rgba(045, 212,191, 0.15);
     }
-    .stAlert {
-        border-radius: 10px;
-    }
+    
+    /* Sleek Glassmorphism Metric Cards */
     .metric-card {
-        background-color: #f0f2f6;
-        padding: 20px;
-        border-radius: 10px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        background: rgba(22, 27, 48, 0.45) !important;
+        border: 1px solid rgba(255, 255, 255, 0.08) !important;
+        border-radius: 16px !important;
+        padding: 24px !important;
+        box-shadow: 0 10px 35px 0 rgba(0, 0, 0, 0.45) !important;
+        backdrop-filter: blur(12px) !important;
+        -webkit-backdrop-filter: blur(12px) !important;
+        transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1) !important;
+    }
+    
+    .metric-card:hover {
+        transform: translateY(-6px);
+        border-color: rgba(045, 212, 191, 0.45) !important;
+        box-shadow: 0 15px 45px 0 rgba(056, 189,248, 0.25) !important;
+        background: rgba(22, 27, 48, 0.65) !important;
+    }
+    
+    /* Modern Streamlit Alerts styling */
+    .stAlert {
+        background: rgba(22, 27, 48, 0.6) !important;
+        border: 1px solid rgba(255, 255, 255, 0.05) !important;
+        border-left: 5px solid #0f766e !important;
+        border-radius: 12px !important;
+        backdrop-filter: blur(10px) !important;
+        box-shadow: 0 8px 24px 0 rgba(0, 0, 0, 0.3) !important;
+    }
+    
+    /* Micro-animations and active elements */
+    button[kind="primary"] {
+        background: linear-gradient(135deg, #0f766e 0%, #0284c7 100%) !important;
+        border: none !important;
+        border-radius: 10px !important;
+        color: white !important;
+        font-weight: 600 !important;
+        padding: 10px 24px !important;
+        box-shadow: 0 4px 15px rgba(045, 212,191, 0.3) !important;
+        transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1) !important;
+    }
+    
+    button[kind="primary"]:hover {
+        transform: scale(1.03);
+        box-shadow: 0 8px 25px rgba(056, 189,248, 0.5) !important;
+        background: linear-gradient(135deg, #14b8a6 0%, #f59e0b 100%) !important;
+    }
+    
+    /* Navigation Sidebar Enhancements */
+    [data-testid="stSidebar"] {
+        background-color: #0b0f19 !important;
+        border-right: 1px solid rgba(255, 255, 255, 0.06) !important;
+    }
+    
+
+    /* Interactive icon navigation */
+    [data-testid="stSidebar"] [role="radiogroup"] label {
+        border: 1px solid rgba(148, 163, 184, 0.18) !important;
+        border-radius: 12px !important;
+        padding: 8px 10px !important;
+        margin: 6px 0 !important;
+        background: rgba(15, 23, 42, 0.36) !important;
+        transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
+    }
+
+    [data-testid="stSidebar"] [role="radiogroup"] label:hover {
+        transform: translateX(4px);
+        border-color: rgba(45, 212, 191, 0.55) !important;
+        background: rgba(20, 184, 166, 0.12) !important;
+        cursor: pointer;
+    }
+
+    [data-testid="stSidebar"] [role="radiogroup"] label p {
+        font-size: 0.98rem !important;
+        font-weight: 700 !important;
+    }
+
+    /* Custom Scrollbar */
+    ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+    }
+    ::-webkit-scrollbar-track {
+        background: #0b0f19;
+    }
+    ::-webkit-scrollbar-thumb {
+        background: #1e293b;
+        border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+        background: #0f766e;
     }
     </style>
 """, unsafe_allow_html=True)
 
 # Title
 st.markdown('<h1 class="main-header">🛡️ AegisGraph Sentinel 2.0</h1>', unsafe_allow_html=True)
-st.markdown('<p style="text-align: center; font-size: 1.2rem; color: #666;">Real-Time Cross-Channel Mule Account Detection & Neutralization</p>', unsafe_allow_html=True)
+st.markdown('<p style="text-align: center; font-size: 1.2rem; color: #94a3b8; font-weight: 500;">Real-Time Cross-Channel Mule Account Detection & Neutralization</p>', unsafe_allow_html=True)
 st.markdown("---")
 
 # Sidebar
@@ -60,24 +157,24 @@ with st.sidebar:
     st.image("https://img.icons8.com/color/96/000000/security-checked.png", width=100)
     st.title("Navigation")
     page = st.radio("Select Page", [
-        "🏠 Dashboard",
-        "🔍 Single Transaction Check",
-        "📊 Batch Processing",
-        "📈 Statistics & Analytics",
-        "🎯 Innovations",
-        "ℹ️ About System"
+        "🧭 Command Center",
+        "💳 Transaction Scan",
+        "📁 Batch Triage",
+        "📊 Risk Analytics",
+        "🧪 Innovation Lab",
+        "ℹ️ System Brief"
     ])
     
     st.markdown("---")
     
     # Innovation sub-menu (conditional)
-    if page == "🎯 Innovations":
+    if page == "🧪 Innovation Lab":
         innovation_page = st.radio("Innovation Module", [
             "🍯 Honeypot Escrow",
             "📞 Voice Stress Analysis",
             "🎯 Predictive Mule Scoring",
             "⌨️ Keystroke Stress Detection",
-            "🔮 Aegis-Oracle Explainer",
+            "🧠 Aegis-Oracle Explainer",
             "⛓️ Blockchain Evidence"
         ])
     else:
@@ -96,13 +193,14 @@ with st.sidebar:
             st.info(mode)
         else:
             st.error("⚠️ API Issue")
-    except:
+    except Exception as e:
+        logger.error(f"Error: {e}")
         st.error("❌ API Offline")
         st.warning("Start API: `python -m uvicorn src.api.main:app --reload`")
 
 # Page: Dashboard
-if page == "🏠 Dashboard":
-    st.header("📊 Real-Time Dashboard")
+if page == "🧭 Command Center":
+    st.header("🧭 Real-Time Command Center")
     
     col1, col2, col3, col4 = st.columns(4)
     
@@ -155,7 +253,7 @@ if page == "🏠 Dashboard":
                 with quick_cols[2]:
                     st.write("")
                     st.write("")
-                    submitted = st.form_submit_button("🔍 Check Now", use_container_width=True)
+                    submitted = st.form_submit_button("🔎 Scan Now", use_container_width=True)
 
             if submitted:
                 # Reset previous state
@@ -173,7 +271,7 @@ if page == "🏠 Dashboard":
                         "amount": float(current_amount),
                         "currency": "INR",
                         "mode": current_mode,
-                        "timestamp": datetime.utcnow().isoformat() + "Z"
+                        "timestamp": datetime.now(timezone.utc).isoformat() + "Z"
                     }
 
                     try:
@@ -262,8 +360,8 @@ if page == "🏠 Dashboard":
         st.error(f"Error connecting to API: {e}")
 
 # Page: Single Transaction Check
-elif page == "🔍 Single Transaction Check":
-    st.header("🔍 Single Transaction Fraud Check")
+elif page == "💳 Transaction Scan":
+    st.header("💳 Single Transaction Fraud Check")
     
     with st.form("transaction_form"):
         col1, col2 = st.columns(2)
@@ -290,7 +388,7 @@ elif page == "🔍 Single Transaction Check":
             if use_biometrics:
                 st.info("Simulated biometrics will be added")
         
-        submit = st.form_submit_button("🔍 Check Transaction", use_container_width=True)
+        submit = st.form_submit_button("🔎 Check Transaction", use_container_width=True)
         
         if submit:
             with st.spinner("🔄 Analyzing transaction..."):
@@ -302,7 +400,7 @@ elif page == "🔍 Single Transaction Check":
                     "amount": float(amount),
                     "currency": currency,
                     "mode": mode,
-                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                    "timestamp": datetime.now(timezone.utc).isoformat() + "Z"
                 }
                 
                 if device_id:
@@ -321,7 +419,7 @@ elif page == "🔍 Single Transaction Check":
                         
                         # Results Display
                         st.markdown("---")
-                        st.subheader("📊 Analysis Results")
+                        st.subheader("📋 Analysis Results")
                         
                         # Top Metrics
                         metric_cols = st.columns(4)
@@ -339,7 +437,7 @@ elif page == "🔍 Single Transaction Check":
                         
                         # Risk Breakdown
                         st.markdown("---")
-                        st.subheader("📈 Risk Component Breakdown")
+                        st.subheader("📊 Risk Component Breakdown")
                         
                         breakdown = result['breakdown']
                         df = pd.DataFrame({
@@ -372,10 +470,10 @@ elif page == "🔍 Single Transaction Check":
                         else:
                             st.success(result['explanation'])
                         
-                        st.info(f"🎯 **Recommended Action:** {result['recommended_action']}")
+                        st.info(f"🚨 **Recommended Action:** {result['recommended_action']}")
                         
                         # JSON Response
-                        with st.expander("🔍 View Full JSON Response"):
+                        with st.expander("🧾 View Full JSON Response"):
                             st.json(result)
                     
                     else:
@@ -387,8 +485,8 @@ elif page == "🔍 Single Transaction Check":
                     st.info("Make sure the API server is running: `python -m uvicorn src.api.main:app --reload`")
 
 # Page: Batch Processing
-elif page == "📊 Batch Processing":
-    st.header("📊 Batch Transaction Processing")
+elif page == "📁 Batch Triage":
+    st.header("📁 Batch Transaction Processing")
     
     st.info("💡 Process multiple transactions at once for bulk fraud detection")
     
@@ -419,7 +517,7 @@ elif page == "📊 Batch Processing":
                         "amount": float(row.get('amount', 0)),
                         "currency": str(row.get('currency', 'INR')),
                         "mode": str(row.get('mode', 'UPI')),
-                        "timestamp": str(row.get('timestamp', datetime.utcnow().isoformat() + "Z"))
+                        "timestamp": str(row.get('timestamp', datetime.now(timezone.utc).isoformat() + "Z"))
                     }
                     
                     # Add optional fields if present in CSV
@@ -481,7 +579,7 @@ elif page == "📊 Batch Processing":
                 
                 # Results
                 st.markdown("---")
-                st.subheader("📈 Results Summary")
+                st.subheader("📊 Results Summary")
                 
                 # Expected results info for sample data
                 st.info("""
@@ -708,8 +806,8 @@ elif page == "📊 Batch Processing":
         )
 
 # Page: Statistics
-elif page == "📈 Statistics & Analytics":
-    st.header("📈 System Statistics & Analytics")
+elif page == "📊 Risk Analytics":
+    st.header("📊 System Statistics & Analytics")
     
     try:
         response = requests.get(f"{API_URL}/stats", timeout=5)
@@ -788,14 +886,14 @@ elif page == "📈 Statistics & Analytics":
         st.error(f"Error: {e}")
 
 # Page: Innovations
-elif page == "🎯 Innovations":
+elif page == "🧪 Innovation Lab":
     # Sub-page: Honeypot Escrow
     if innovation_page == "🍯 Honeypot Escrow":
         st.header("🍯 Honeypot Escrow - Deceptive Containment System")
         
         st.markdown("""
         **Innovation 2**: High-risk transactions show "Success" to criminals but funds transfer to 
-        shadow escrow. ATM withdrawal attempts trigger GPS police alerts. **87% arrest rate** 🎯
+        shadow escrow. ATM withdrawal attempts trigger GPS police alerts. **87% arrest rate** 🚓 
         """)
         
         st.markdown("---")
@@ -877,7 +975,7 @@ elif page == "🎯 Innovations":
         
         st.markdown("""
         **Innovation 5**: Detects phone coercion during transactions through acoustic stress analysis.
-        Extracts F0 (pitch), jitter, shimmer, speech rate, prosody. **92% detection accuracy** 🎯
+        Extracts F0 (pitch), jitter, shimmer, speech rate, prosody. **92% detection accuracy** 📞 
         """)
         
         st.markdown("---")
@@ -900,7 +998,7 @@ elif page == "🎯 Innovations":
         if uploaded_file is not None:
             st.audio(uploaded_file, format="audio/wav")
             
-            if st.button("🔍 Analyze Voice Stress", type="primary", use_container_width=True):
+            if st.button("🎙️ Analyze Voice Stress", type="primary", use_container_width=True):
                 with st.spinner("Analyzing acoustic features..."):
                     try:
                         # Read audio file
@@ -921,7 +1019,7 @@ elif page == "🎯 Innovations":
                             result = response.json()
                             
                             st.markdown("---")
-                            st.subheader("📊 Analysis Results")
+                            st.subheader("📋 Analysis Results")
                             
                             col1, col2, col3 = st.columns(3)
                             
@@ -978,7 +1076,7 @@ elif page == "🎯 Innovations":
         st.markdown("""
         **Innovation 4**: Identifies mule accounts at creation, before first transaction.
         Analyzes 12 features including temporal clustering, device novelty, document quality.
-        **86% precision**, ₹14.2 crore prevented 🎯
+        **86% precision**, ₹14.2 crore prevented 🛡️ 
         """)
         
         st.markdown("---")
@@ -1006,7 +1104,7 @@ elif page == "🎯 Innovations":
             initial_deposit = st.number_input("Initial Deposit (₹)", min_value=0.0, value=0.0, step=100.0)
             form_time = st.number_input("Form Completion Time (seconds)", min_value=60, max_value=1800, value=300)
         
-        if st.button("🔍 Score Account Opening", type="primary", use_container_width=True):
+        if st.button("🏦 Score Account Opening", type="primary", use_container_width=True):
             with st.spinner("Analyzing account opening patterns..."):
                 try:
                     payload = {
@@ -1032,7 +1130,7 @@ elif page == "🎯 Innovations":
                         result = response.json()
                         
                         st.markdown("---")
-                        st.subheader("📊 Mule Risk Assessment")
+                        st.subheader("🚨 Mule Risk Assessment")
                         
                         col1, col2, col3 = st.columns(3)
                         
@@ -1118,7 +1216,7 @@ elif page == "🎯 Innovations":
         st.subheader("📝 Simulate Keystroke Data")
         hold = st.text_area("Hold times (ms, comma-separated)", "120,180,220,160")
         flight = st.text_area("Flight times (ms, comma-separated)", "80,90,85,95")
-        if st.button("🔍 Analyze Typing Stress", use_container_width=True):
+        if st.button("⌨️ Analyze Typing Stress", use_container_width=True):
             try:
                 hold_times = [float(x.strip()) for x in hold.split(',') if x.strip()]
                 flight_times = [float(x.strip()) for x in flight.split(',') if x.strip()]
@@ -1129,7 +1227,7 @@ elif page == "🎯 Innovations":
                     "amount": 1,
                     "currency": "INR",
                     "mode": "UPI",
-                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                    "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
                     "biometrics": {"hold_times": hold_times, "flight_times": flight_times}
                 }
                 resp = requests.post(f"{API_URL}/api/v1/fraud/check", json=payload, timeout=10)
@@ -1143,8 +1241,8 @@ elif page == "🎯 Innovations":
                 st.error(f"Failed to analyze: {e}")
 
     # Sub-page: Aegis-Oracle Explainer
-    elif innovation_page == "🔮 Aegis-Oracle Explainer":
-        st.header("🔮 Aegis-Oracle - AI Explanations Engine")
+    elif innovation_page == "🧠 Aegis-Oracle Explainer":
+        st.header("🧠 Aegis-Oracle - Explanation Engine")
         
         st.markdown("""
         **Innovation 3**: Our proprietary oracle generates human-readable explanations
@@ -1159,7 +1257,7 @@ elif page == "🎯 Innovations":
         amt = st.number_input("Amount", value=1000.0)
         score = st.slider("Risk Score", 0.0, 1.0, 0.25)
         dec = st.selectbox("Decision", ["ALLOW","REVIEW","BLOCK"])
-        if st.button("🔍 Generate Explanation"):
+        if st.button("🧠 Generate Explanation"):
             payload = {
                 "transaction_id": txn_id,
                 "amount": amt,
@@ -1313,8 +1411,8 @@ elif page == "🎯 Innovations":
                             st.error(f"Error exporting evidence: {e}")
 
 # Page: About
-elif page == "ℹ️ About System":
-    st.header("ℹ️ About AegisGraph Sentinel 2.0")
+elif page == "ℹ️ System Brief":
+    st.header("i      About AegisGraph Sentinel 2.0")
     # Insert latest PR summary for quick review
     with st.expander("Latest PR: feat: implement production-ready HTGNN with temporal graphs (#21)"):
         st.markdown('''
@@ -1344,7 +1442,7 @@ elif page == "ℹ️ About System":
     **AegisGraph Sentinel 2.0** is an advanced fraud detection system designed for the 2026 National Fraud Prevention Challenge,
     featuring **6 breakthrough innovations** that achieve **₹27.6+ crore** in prevented losses.
     
-    #### 🎯 Core Features
+    #### 🧭 Core Features
     
     - **Heterogeneous Temporal Graph Neural Networks (HTGNN)**: Advanced AI model for detecting complex fraud patterns
     - **Multi-Modal Risk Assessment**: Combines graph topology, transaction velocity, behavioral biometrics, and entropy analysis
@@ -1354,7 +1452,7 @@ elif page == "ℹ️ About System":
     
     #### 🏆 Six Breakthrough Innovations
     
-    1. **🔍 Hesitation Monitor** (Innovation 1)  
+    1. **⌨️ Hesitation Monitor** (Innovation 1)  
        Keystroke stress detection for social engineering | **89% accuracy** | ₹8.2 crore prevented
     
     2. **🍯 Honeypot Escrow** (Innovation 2)  
@@ -1374,7 +1472,7 @@ elif page == "ℹ️ About System":
     
     **Total Impact**: ₹27.6+ crore prevented | 87% arrest rate | 89-92% accuracy
     
-    #### 📊 Technology Stack
+    #### 🧰 Technology Stack
     
     - **Backend**: FastAPI, PyTorch, PyTorch Geometric, NetworkX
     - **Frontend**: Streamlit
@@ -1383,7 +1481,7 @@ elif page == "ℹ️ About System":
     - **Blockchain**: Hyperledger Fabric (simulated, 18 nodes, RAFT consensus)
     - **Audio**: Librosa, SciPy for voice stress analysis
     
-    #### 🔍 Detection Capabilities
+    #### 🔎 Detection Capabilities
     
     1. **Mule Account Chains**: Detects layered money laundering patterns
     2. **Star Patterns**: Identifies central distribution hubs
@@ -1398,7 +1496,7 @@ elif page == "ℹ️ About System":
     - **PRODUCTION MODE**: Full neural network-based fraud detection with trained models
     - **INNOVATIONS MODE**: All 6 breakthrough innovations enabled (requires additional dependencies)
     
-    #### 📞 API Endpoints
+    #### 🔌 API Endpoints
     
     **Core Endpoints:**
     - `GET /health`: System health check
@@ -1421,7 +1519,7 @@ elif page == "ℹ️ About System":
     2. **Launch Web App**: `streamlit run app.py`
     3. **Test Transactions**: Use the Single Transaction Check page
     4. **Batch Process**: Upload CSV files for bulk analysis
-    5. **Explore Innovations**: Navigate to 🎯 Innovations page
+    5. **Explore Innovations**: Navigate to 🧪 Innovation Lab page
     
     #### 📚 Documentation
     
@@ -1450,6 +1548,6 @@ elif page == "ℹ️ About System":
 # Footer
 st.markdown("---")
 st.markdown(
-    '<p style="text-align: center; color: #666;">© 2026 AegisGraph Sentinel 2.0 | Detecting the Flow, Protecting the Soul 🛡️</p>',
+    '<p style="text-align: center; color: #94a3b8; font-weight: 500;">© 2026 AegisGraph Sentinel 2.0 | Detecting the Flow, Protecting the Soul 🛡️</p>',
     unsafe_allow_html=True
 )

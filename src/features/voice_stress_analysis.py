@@ -16,10 +16,13 @@ Accuracy: 92% detection rate in retrospective analysis
 Privacy: Voice clips deleted after 24 hours, no content analysis
 """
 
+import logging
 import numpy as np
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 import warnings
+
+logger = logging.getLogger(__name__)
 
 try:
     import librosa
@@ -74,6 +77,7 @@ class VoiceStressAnalyzer:
         # Baseline values (updated with user data over time)
         self.baseline_f0 = 120.0  # Hz (typical for mixed gender)
         self.baseline_speech_rate = 4.5  # syllables/sec
+        self.user_baseline = None  # Per-user baseline, populated over time
         
     def extract_features(
         self,
@@ -189,9 +193,17 @@ class VoiceStressAnalyzer:
             classification = "NORMAL"
             action = "PROCEED"
         
+        # Compute confidence based on signal quality indicators
+        # Higher SNR and more voiced frames → higher confidence
+        snr_factor = min(features.snr / 30.0, 1.0)  # Good SNR → high confidence
+        pitch_factor = min(features.f0_std / 50.0, 1.0)  # Some variation → reliable
+        confidence = 0.5 + 0.3 * snr_factor + 0.2 * pitch_factor
+        confidence = round(min(max(confidence, 0.0), 1.0), 3)
+
         return {
             'stress_score': stress_score,
             'classification': classification,
+            'confidence': confidence,
             'recommended_action': action,
             'f0_stress': f0_stress,
             'jitter_stress': jitter_stress,
@@ -228,7 +240,8 @@ class VoiceStressAnalyzer:
                 f0_mean, f0_std, f0_range = 120.0, 10.0, 50.0
             
             return f0_mean, f0_std, f0_range
-        except:
+        except Exception as e:
+            logger.error(f"Error: {e}")
             return 120.0, 10.0, 50.0
     
     def _compute_jitter(
@@ -262,7 +275,8 @@ class VoiceStressAnalyzer:
                 return float(jitter)
             else:
                 return 0.005  # Normal baseline
-        except:
+        except Exception as e:
+            logger.error(f"Error: {e}")
             return 0.005
     
     def _compute_shimmer(
@@ -294,7 +308,8 @@ class VoiceStressAnalyzer:
                 return float(shimmer)
             else:
                 return 0.05  # Normal baseline
-        except:
+        except Exception as e:
+            logger.error(f"Error: {e}")
             return 0.05
     
     def _estimate_speech_rate(
@@ -325,7 +340,8 @@ class VoiceStressAnalyzer:
             syllables_per_sec = len(peaks) / duration
             
             return float(syllables_per_sec)
-        except:
+        except Exception as e:
+            logger.error(f"Error: {e}")
             return 4.5  # Normal baseline
     
     def _compute_prosody_entropy(
@@ -354,7 +370,8 @@ class VoiceStressAnalyzer:
             entropy = -np.sum(hist * np.log(hist + 1e-10))
             
             return float(entropy)
-        except:
+        except Exception as e:
+            logger.error(f"Error: {e}")
             return 3.0
     
     def _compute_snr(self, audio: np.ndarray) -> float:
@@ -378,7 +395,8 @@ class VoiceStressAnalyzer:
             
             snr = 10 * np.log10((signal_power / (noise_power + 1e-10)))
             return float(max(snr, 0))
-        except:
+        except Exception as e:
+            logger.error(f"Error: {e}")
             return 20.0  # Normal SNR
     
     def _detect_multiple_speakers(
@@ -402,7 +420,8 @@ class VoiceStressAnalyzer:
                 return 2  # Multiple speakers detected
             else:
                 return 1  # Single speaker
-        except:
+        except Exception as e:
+            logger.error(f"Error: {e}")
             return 1
     
     def _mock_features(self) -> VoiceFeatures:
@@ -431,7 +450,19 @@ class VoiceStressAnalyzer:
             Dictionary with stress analysis results
         """
         try:
-            features = self.extract_features(audio_file, sample_rate)
+            # Load audio from file path into numpy array
+            if AUDIO_LIBS_AVAILABLE:
+                audio, sr = librosa.load(audio_file, sr=sample_rate)
+            else:
+                logger.warning("Audio libraries not available, returning mock features")
+                audio = None
+                sr = sample_rate
+
+            if audio is not None:
+                features = self.extract_features(audio, sr)
+            else:
+                features = self._mock_features()
+
             result = self.detect_stress(features, self.user_baseline)
             
             return {
@@ -448,23 +479,12 @@ class VoiceStressAnalyzer:
                 },
                 'recommended_action': 'ESCALATE_TO_INVESTIGATION' if result['classification'] == 'SEVERE_COERCION' else 'CONTINUE_TRANSACTION',
             }
-        except Exception as e:
-            # Return mock result on error
-            mock_features = self._mock_features()
-            return {
-                'stress_score': 35.0,
-                'classification': 'NORMAL',
-                'confidence': 0.65,
-                'features': {
-                    'f0_mean': mock_features.f0_mean,
-                    'jitter': mock_features.jitter,
-                    'shimmer': mock_features.shimmer,
-                    'speech_rate': mock_features.speech_rate,
-                    'prosody_entropy': mock_features.prosody_entropy,
-                    'snr': mock_features.snr,
-                },
-                'recommended_action': 'CONTINUE_TRANSACTION',
-            }
+        except (OSError, IOError) as e:
+            logger.error("Failed to load audio file '%s': %s", audio_file, e)
+            raise
+        except (ValueError, TypeError) as e:
+            logger.error("Invalid audio data from '%s': %s", audio_file, e)
+            raise
 
 
 def analyze_voice_recording(

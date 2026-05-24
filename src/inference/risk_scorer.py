@@ -500,7 +500,10 @@ def compute_risk_score(
                     if current_score > spike_threshold and baseline_avg > 0:
                         lateral_movement_detected = True
                         lateral_movement_reason = f"Lateral movement detected: {source_account} betweenness centrality spiked from baseline {baseline_avg:.4f} to {current_score:.4f} (MITRE ATT&CK TA0008)"
+
                         graph_risk += _LATERAL_RISK_INCREMENT
+
+                       
                         _inference_logger.warning(
                             f"Lateral movement detected for {source_account}",
                             event_type="lateral_movement",

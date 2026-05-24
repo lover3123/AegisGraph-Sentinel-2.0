@@ -300,8 +300,9 @@ class PredictiveMuleScorer:
         # Simple heuristic: check if IP is VPN/proxy
         ip = account_data.ip_address
         
-        # Common VPN/proxy ranges (simplified)
-        suspicious_patterns = ['10.', '172.16.', '192.168.']
+        # Removed RFC 1918 private IPs (caused false positives for NAT users)
+        # TODO: Implement proper GeoIP or threat intelligence lookup for VPN/proxy detection
+        suspicious_patterns = []
         
         if any(ip.startswith(p) for p in suspicious_patterns):
             return 70.0
@@ -380,7 +381,7 @@ class PredictiveMuleScorer:
         """
         # In real implementation, check with telecom provider
         # Here we use a simple hash-based simulation
-        phone_hash = int(hashlib.md5(account_data.phone_number.encode()).hexdigest(), 16)
+        phone_hash = int(hashlib.sha256(account_data.phone_number.encode()).hexdigest(), 16)
         simulated_age = phone_hash % 365  # 0-365 days
         
         if simulated_age < 7:
@@ -486,6 +487,14 @@ class PredictiveMuleScorer:
         if account_data.referral_code:
             ref = account_data.referral_code
             self.referral_history[ref] = self.referral_history.get(ref, 0) + 1
+
+        # Prevent unbounded memory growth by capping dictionary sizes
+        MAX_HISTORY_SIZE = 10000
+        for history_dict in (self.device_history, self.ip_history, self.referral_history):
+            if len(history_dict) > MAX_HISTORY_SIZE:
+                keys_to_remove = list(history_dict.keys())[:1000]
+                for k in keys_to_remove:
+                    del history_dict[k]
     
     def get_statistics(self) -> Dict[str, int]:
         """Get statistics about recent account openings"""
@@ -543,7 +552,7 @@ def score_new_account(
         ip_address=ip_address,
         device_id=device_id,
         device_age_days=np.random.randint(10, 365),
-        browser_fingerprint=hashlib.md5(device_id.encode()).hexdigest(),
+        browser_fingerprint=hashlib.sha256(device_id.encode()).hexdigest(),
         referrer_url=None,
         initial_deposit=initial_deposit,
         account_type="Savings",

@@ -409,75 +409,9 @@ async def batch_score(requests: List[TransactionRequest]):
 
 ## 5. Deployment
 
-### 5.1 Docker Container
-
-```dockerfile
-# Dockerfile
-FROM pytorch/pytorch:2.0-cuda11.8-runtime-ubuntu22.04
-
-WORKDIR /app
-
-# Install dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install torch-geometric
-
-# Copy code
-COPY . .
-
-# Download pre-trained model (if available)
-# RUN wget https://s3.example.com/models/htgnn_best.pt -O models/htgnn_best.pt
-
-# Expose port
-EXPOSE 8000
-
-# Start API
-CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
-```
-
-### 5.2 Docker Compose
-
-```yaml
-# docker-compose.yml
-version: '3.8'
-
-services:
-  api:
-    build: .
-    ports:
-      - "8000:8000"
-    environment:
-      - PYTHONUNBUFFERED=1
-      - CUDA_VISIBLE_DEVICES=0
-    volumes:
-      - ./models:/app/models
-      - ./config:/app/config
-    depends_on:
-      - neo4j
-      - redis
-  
-  neo4j:
-    image: neo4j:5.0
-    ports:
-      - "7687:7687"
-    environment:
-      NEO4J_AUTH: neo4j/password
-      NEO4J_ACCEPT_LICENSE_AGREEMENT: "yes"
-    volumes:
-      - neo4j_data:/data
-  
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-
-volumes:
-  neo4j_data:
-```
-
-Deploy:
+Run the API server directly:
 ```bash
-docker-compose up -d
+python -m src.api.main
 ```
 
 ---
@@ -634,7 +568,7 @@ early_stopping_patience = 10  # Increase to 20 to give more epochs
 - [x] Test single transaction endpoint
 - [x] Test batch scoring endpoint
 - [x] Monitor latency and accuracy
-- [x] Deploy to production (Docker)
+- [x] Deploy to production
 - [x] Set up monitoring/alerting
 - [x] Plan weekly retraining cadence
 

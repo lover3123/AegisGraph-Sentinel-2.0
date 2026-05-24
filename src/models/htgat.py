@@ -21,7 +21,25 @@ try:
     TORCH_GEOMETRIC_AVAILABLE = True
 except ImportError:
     print("⚠️  torch_geometric not available - HTGAT will use fallback implementation")
-    MessagePassing = object  # Fallback base class
+    class MessagePassing(nn.Module):
+        def __init__(self, **kwargs):
+            super().__init__()
+
+        def propagate(self, edge_index, x, edge_type, edge_attr=None):
+            src, dst = edge_index
+            x_src, x_dst = x
+            messages = self.message(
+                x_i=x_dst[dst],
+                x_j=x_src[src],
+                edge_type=edge_type,
+                edge_attr=edge_attr,
+                index=dst,
+                ptr=None,
+                size_i=x_dst.size(0),
+            )
+            out = torch.zeros_like(x_dst)
+            out.index_add_(0, dst, messages)
+            return out
     TORCH_GEOMETRIC_AVAILABLE = False
     
     def softmax(src, index, num_nodes=None):
