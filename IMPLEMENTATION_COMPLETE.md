@@ -208,7 +208,6 @@ AegisGraph Sentinel 2.0/
 ## 🎓 Next Steps (Optional Enhancements)
 
 ### High Priority
-- [ ] Docker containerization
 - [ ] Production security (auth, rate limiting)
 - [ ] Monitoring dashboard (Grafana)
 

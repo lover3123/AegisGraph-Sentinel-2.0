@@ -503,6 +503,7 @@ def compute_risk_score(
                                 "current_score": current_score,
                             },
                         )
+                       
                 
                 # Update baseline (rolling window)
                 baseline_history.append(current_score)

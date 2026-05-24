@@ -87,9 +87,7 @@ aegis/AegisGraph-Sentinel-2.0/
 │   └── pretrained/
 │       └── README.md                    ← Where to download pre-trained models
 │
-├── 🐳 Deployment
-│   ├── Dockerfile                       ✓ Production image
-│   ├── docker-compose.yml              ✓ Full stack (API + Neo4j + Redis)
+├── � Deployment
 │   ├── kubernetes/
 │   │   ├── deployment.yaml              ○ K8s deployment
 │   │   ├── service.yaml                 ○ K8s service
@@ -98,7 +96,6 @@ aegis/AegisGraph-Sentinel-2.0/
 │   └── ci-cd/
 │       ├── .github/workflows/
 │       │   ├── test.yml                 ○ Run tests
-│       │   ├── build.yml                ○ Build Docker image
 │       │   └── deploy.yml               ○ Deploy to production
 │       │
 │       └── .gitlab-ci.yml               ○ GitLab CI config
@@ -148,7 +145,6 @@ aegis/AegisGraph-Sentinel-2.0/
 │
 ├── 📋 Meta Files
 │   ├── .gitignore                       ✓ Excludes models/*.pt, logs/
-│   ├── .dockerignore                    ✓ Docker build exclusions
 │   ├── LICENSE                          ○ License
 │   ├── CONTRIBUTING.md                  ○ Contribution guide
 │   └── CHANGELOG.md                     ○ Version history
@@ -188,9 +184,6 @@ Legend:
 │
 ├── logs/                         # Training and inference logs (runtime)
 │   └── training.log
-│
-├── docker/                       # Docker configuration
-│   └── Dockerfile
 │
 └── example_usage.py              # Example scripts
     └── example_training.py
@@ -390,10 +383,6 @@ All settings are in `config/config.yaml`:
 - Needs: Model loading in startup, HTGNN wiring in scoring endpoint
 - See: IMPLEMENTATION_GUIDE.md Section 4
 
-**Docker Deployment:**
-- Dockerfile template ready
-- docker-compose with Neo4j + Redis
-- Needs: Final testing in containerized environment
 
 **Monitoring:**
 - Prometheus/Grafana configurations
@@ -426,7 +415,7 @@ All settings are in `config/config.yaml`:
 
 4. **Deploy**
    ```bash
-   docker-compose up -d
+   python -m src.api.main
    ```
 
 ---
@@ -468,9 +457,8 @@ Grand Total: ~5000 lines of implementation + documentation
 3. Test end-to-end: API → model → score ← 20 mins
 
 ### Medium Priority (Production Ready)
-4. Docker build & test ← 30 mins
-5. Monitoring/alerting setup ← 1 hour
-6. Test coverage (unit + integration) ← 2 hours
+4. Monitoring/alerting setup ← 1 hour
+5. Test coverage (unit + integration) ← 2 hours
 
 ### Lower Priority (Polish)
 7. Kubernetes deployment ← 2 hours

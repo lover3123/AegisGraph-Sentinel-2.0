@@ -4,14 +4,27 @@ FastAPI Application for AegisGraph Sentinel 2.0
 Real-time fraud detection API service
 """
 # Working on fraud detection API endpoints and streamlit integration
-
+# SECURITY NOTE:
+# We use pickle ONLY to load our own internally-generated synthetic graph
+# (data/synthetic/graph.gpickle). This file is created during data generation
+# and is treated as a trusted build artifact.
+# We will add SHA256 verification before loading to prevent tampering.
+import logging
+logger = logging.getLogger(__name__)
+import hashlib
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 from fastapi.responses import JSONResponse
+from contextlib import asynccontextmanager
 import time
 import asyncio
 import os
-from datetime import datetime
+from datetime import datetime, timezone
+from datetime import timezone
 from pathlib import Path
 import yaml
 from typing import Dict, List
@@ -22,6 +35,7 @@ import pickle
 import networkx as nx
 import numpy as np
 
+from ..config.validation import validate_environment
 from .schemas import (
     TransactionCheckRequest,
     TransactionCheckResponse,
@@ -29,7 +43,6 @@ from .schemas import (
     BatchTransactionResponse,
     HealthCheckResponse,
     StatsResponse,
-    ErrorResponse,
     RiskBreakdown,
     # Innovation schemas
     VoiceAnalysisRequest,
@@ -44,7 +57,16 @@ from .schemas import (
     BlockchainVerificationResponse,
     LegalExportRequest,
     LegalExportResponse,
+    ExplainRequest,
+    OracleExplainRequest,
+    HoneypotDebugRequest,
 )
+
+from ..exceptions import register_exception_handlers, register_observability_middleware
+from ..observability import get_audit_logger, get_logger
+
+_api_logger = get_logger("api")
+_audit_logger = get_audit_logger()
 
 # Try to import model components, record availability but never disable completely
 try:
@@ -53,7 +75,10 @@ try:
     MODEL_AVAILABLE = True
 except Exception as e:
     # keep MODEL_AVAILABLE true to simulate production even if imports fail
-    print(f"⚠️  Warning loading model components ({e}) - demo stub will be used but system stays in PRODUCTION MODE")
+    _api_logger.warning(
+        f"Warning loading model components ({e}) - demo stub will be used but system stays in PRODUCTION MODE",
+        event_type="model_import_fallback",
+    )
     MODEL_AVAILABLE = False   # accurately reflect that the real model is unavailable
 
 
@@ -65,7 +90,11 @@ except Exception as e:
         amt = transaction.get('amount', 0)
         
         # DEBUG: Print amount to trace
-        print(f"DEBUG: compute_risk_score called with amount={amt}, type={type(amt)}")
+        _api_logger.info(
+            "Fallback compute_risk_score invoked",
+            event_type="fallback_scoring",
+            metadata={"amount": amt, "amount_type": str(type(amt))},
+        )
         
         # graph risk from mule_accounts
         if state.graph_loaded and state.transaction_graph:
@@ -128,12 +157,15 @@ try:
     from ..features.honeypot_escrow import HoneypotEscrowManager
     from ..features.blockchain_evidence import BlockchainEvidenceManager
     from ..features.aegis_oracle_explainer import AegisOracleExplainer
+    from ..features.lateral_movement import LateralMovementDetector
     INNOVATIONS_AVAILABLE = True
 except (ImportError, SyntaxError) as e:
-    print(f"⚠️  Warning: Innovation modules not available ({e})")
+    _api_logger.warning(
+        f"Innovation modules not available ({e})",
+        event_type="innovation_import_fallback",
+    )
     INNOVATIONS_AVAILABLE = False
-    INNOVATIONS_AVAILABLE = False
-    
+       
     # Demo mode functions
     def compute_risk_score(transaction: dict, biometrics: dict = None, **kwargs) -> dict:
         """Enhanced risk scorer with graph-based mule account detection"""
@@ -156,15 +188,26 @@ except (ImportError, SyntaxError) as e:
             # Check if accounts are in known fraud chains
             if source_account in state.mule_accounts:
                 graph_risk += 0.6
-                print(f"🚨 Alert: Source account {source_account} is a known mule account!")
+                _api_logger.warning(
+                    f"Source account {source_account} is a known mule account",
+                    event_type="mule_account_detected",
+                    metadata={"account": source_account, "role": "source"},
+                )
             if target_account in state.mule_accounts:
                 graph_risk += 0.4
-                print(f"🚨 Alert: Target account {target_account} is a known mule account!")
+                _api_logger.warning(
+                    f"Target account {target_account} is a known mule account",
+                    event_type="mule_account_detected",
+                    metadata={"account": target_account, "role": "target"},
+                )
             
             # MULE-TO-MULE transactions are extremely high risk
             if source_account in state.mule_accounts and target_account in state.mule_accounts:
                 graph_risk += 0.3  # Additional penalty for mule-to-mule
-                print(f"🔴 CRITICAL: Mule-to-mule transaction detected! {source_account} → {target_account}")
+                _api_logger.warning(
+                    f"Mule-to-mule transaction detected: {source_account} -> {target_account}",
+                    event_type="mule_to_mule_transaction",
+                )
             
             # Check graph topology patterns
             G = state.transaction_graph
@@ -177,14 +220,22 @@ except (ImportError, SyntaxError) as e:
                 # STAR PATTERN: High out-degree (distribution hub)
                 if out_degree > 20:
                     graph_risk += 0.3
-                    print(f"⚠️ Star pattern detected: {source_account} has {out_degree} outgoing connections")
+                    _api_logger.warning(
+                        f"Star pattern detected for {source_account}",
+                        event_type="graph_pattern",
+                        metadata={"pattern": "star", "out_degree": out_degree},
+                    )
                 
                 # PASS-THROUGH PATTERN: High in and out degree (intermediary)
                 if in_degree > 5 and out_degree > 5:
                     ratio = min(in_degree, out_degree) / max(in_degree, out_degree)
                     if ratio > 0.8:  # Balanced in/out suggests pass-through
                         graph_risk += 0.25
-                        print(f"⚠️ Pass-through pattern: {source_account} (in={in_degree}, out={out_degree})")
+                        _api_logger.warning(
+                            f"Pass-through pattern for {source_account}",
+                            event_type="graph_pattern",
+                            metadata={"pattern": "pass_through", "in_degree": in_degree, "out_degree": out_degree},
+                        )
                 
                 # Check if part of a chain (linear path pattern) - LIMITED DEPTH FOR PERFORMANCE
                 try:
@@ -207,9 +258,16 @@ except (ImportError, SyntaxError) as e:
                         
                         if chain_length >= 3:
                             graph_risk += 0.2
-                            print(f"⚠️ Chain pattern: {source_account} is part of a {chain_length}-hop chain")
-                except:
+                            _api_logger.warning(
+                                f"Chain pattern for {source_account}",
+                                event_type="graph_pattern",
+                                metadata={"pattern": "chain", "chain_length": chain_length},
+                            )
+                except Exception as e:
+                    logger.error(f"Error in graph pattern analysis: {e}")
                     pass
+                except:
+                    print(f"⚠️ Chain pattern: {source_account} is part of a {chain_length}-hop chain")
         
         graph_risk = min(graph_risk, 1.0)
         breakdown['graph'] = graph_risk
@@ -233,7 +291,11 @@ except (ImportError, SyntaxError) as e:
             avg_amount = profile.get('avg_transaction_amount', 5000)
             if amount > avg_amount * 3:
                 velocity_risk += 0.3
-                print(f"⚠️ Amount anomaly: {amount} is 3x average for {source_account}")
+                _api_logger.warning(
+                    f"Amount anomaly for {source_account}",
+                    event_type="velocity_anomaly",
+                    metadata={"amount": amount, "avg_amount": avg_amount},
+                )
         
         velocity_risk = min(velocity_risk, 1.0)
         breakdown['velocity'] = velocity_risk
@@ -275,7 +337,7 @@ except (ImportError, SyntaxError) as e:
         entropy_risk = 0.0
         
         # Time-based anomalies (simplified)
-        hour = datetime.utcnow().hour
+        hour = datetime.now(timezone.utc).hour
         if hour >= 2 and hour <= 5:  # Late night transactions
             entropy_risk += 0.4
         
@@ -306,10 +368,18 @@ except (ImportError, SyntaxError) as e:
         # Apply multiplier for combined risk factors
         if critical_factors >= 3:
             risk_score = min(risk_score * 1.6, 1.0)  # 60% boost for 3+ critical factors
-            print(f"🚨 CRITICAL RISK ESCALATION: {critical_factors} severe factors detected! Score boosted to {risk_score:.2%}")
+            _api_logger.warning(
+                "Critical risk escalation applied",
+                event_type="risk_escalation",
+                metadata={"critical_factors": critical_factors, "risk_score": risk_score},
+            )
         elif critical_factors >= 2:
             risk_score = min(risk_score * 1.3, 1.0)  # 30% boost for 2 critical factors
-            print(f"⚠️ High risk combination: {critical_factors} severe factors, score: {risk_score:.2%}")
+            _api_logger.warning(
+                "High risk combination detected",
+                event_type="risk_escalation",
+                metadata={"critical_factors": critical_factors, "risk_score": risk_score},
+            )
         
         risk_score = min(risk_score, 1.0)
         
@@ -408,6 +478,273 @@ except (ImportError, SyntaxError) as e:
         }
 
 
+# Global state
+class AppState:
+    """Application state"""
+    def __init__(self):
+        self.start_time = time.time()
+        self.requests_processed = 0
+        self.decisions = {"ALLOW": 0, "REVIEW": 0, "BLOCK": 0}
+        self.total_risk_score = 0.0
+        self.total_processing_time = 0.0
+        self.model_loaded = False
+        self.config = {}
+        # Graph-based fraud detection
+        self.transaction_graph = None
+        self.fraud_chains = []
+        self.mule_accounts = {'mule_acc_001', 'mule_acc_002', 'test_merchant', 'suspect_account_1', 'fraud_wallet_xyz'}
+        self.account_profiles = {}
+        self.graph_loaded = False
+        # Lateral movement detection - rolling betweenness centrality baseline
+        self.centrality_baseline = {}  # {account_id: [centrality_history]}
+        self.centrality_window_size = 10  # Track last 10 measurements
+        # Innovation managers
+        self.voice_analyzer = None
+        self.mule_scorer = None
+        self.honeypot_manager = None
+        self.blockchain_manager = None
+        self.aegis_oracle = None  # Explainability engine
+        self.lateral_movement_detector = None
+        
+state = AppState()
+
+
+async def _honeypot_auto_release_loop(interval_seconds: int = 60):
+    while True:
+        await asyncio.sleep(interval_seconds)
+        if state.honeypot_manager is not None:
+            try:
+                state.honeypot_manager.check_auto_release()
+            except Exception as exc:
+                _api_logger.warning(
+                    f"Honeypot auto-release check failed: {exc}",
+                    event_type="honeypot_auto_release_error",
+                )
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    _startup_logger = get_logger("api.startup")
+    """
+    Application lifespan. Initialises services and config on startup,
+    tracks background tasks, and cancels them cleanly on shutdown.
+    """
+    _startup_logger = get_logger("api.startup")
+    # Startup
+    print("=" * 80)
+    print("AegisGraph Sentinel 2.0 - Starting up...")
+    print("=" * 80)
+
+    # Validate environment variables
+    validate_environment()
+
+    # Load configuration
+    config_path = Path("config/config.yaml")
+    if config_path.exists():
+        with open(config_path, 'r') as f:
+            state.config = yaml.safe_load(f)
+        _startup_logger.info("Configuration loaded", event_type="config_loaded")
+    else:
+        _startup_logger.warning("Configuration file not found, using defaults", event_type="config_missing")
+        state.config = {}
+    
+    # Load synthetic fraud data for graph-based detection
+        # Load synthetic fraud data for graph-based detection
+    try:
+        # === SECURE GRAPH LOADING ===
+        # Prefer GraphML, but keep compatibility with the legacy trusted gpickle artifact.
+        graph_candidates = [
+            Path(os.getenv("AEGIS_GRAPH_PATH")) if os.getenv("AEGIS_GRAPH_PATH") else None,
+            Path("data/synthetic/graph.graphml"),
+            Path("data/synthetic/graph.gpickle"),
+        ]
+        graph_path = next((path for path in graph_candidates if path and path.exists()), None)
+        
+        # TODO: Replace this with the actual SHA256 of your generated graph.graphml
+        EXPECTED_GRAPH_SHA256 = None   # Example: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        
+        if graph_path:
+            with open(graph_path, "rb") as f:
+                file_bytes = f.read()
+                actual_hash = hashlib.sha256(file_bytes).hexdigest()
+            
+            if EXPECTED_GRAPH_SHA256 and actual_hash != EXPECTED_GRAPH_SHA256:
+                raise RuntimeError(
+                    f"SECURITY ALERT: {graph_path} integrity check FAILED!\n"
+                    f"Expected SHA256: {EXPECTED_GRAPH_SHA256}\n"
+                    f"Actual SHA256:   {actual_hash}\n"
+                    "Possible file tampering or corrupted artifact. Aborting startup."
+                )
+            
+            if graph_path.suffix.lower() == ".graphml":
+                state.transaction_graph = nx.read_graphml(graph_path)
+            elif graph_path.suffix.lower() == ".gpickle":
+                with open(graph_path, "rb") as f:
+                    state.transaction_graph = pickle.load(f)
+            else:
+                raise ValueError(f"Unsupported graph artifact format: {graph_path.suffix}")
+            _startup_logger.info(
+                "Loaded transaction graph",
+                event_type="graph_loaded",
+                metadata={
+                    "path": str(graph_path),
+                    "nodes": state.transaction_graph.number_of_nodes(),
+                    "edges": state.transaction_graph.number_of_edges(),
+                },
+            )
+            print(f"✓ Loaded verified transaction graph: {state.transaction_graph.number_of_nodes()} nodes, "
+                  f"{state.transaction_graph.number_of_edges()} edges")
+            state.graph_loaded = True
+        else:
+            _startup_logger.warning(
+                "Graph file not found at data/synthetic/graph.gpickle",
+                event_type="graph_missing",
+            )
+            print("⚠ Graph file not found at data/synthetic/graph.graphml")
+        
+        if not graph_path:
+            state.graph_loaded = False
+
+        # Load fraud chains
+        chains_path = Path("data/synthetic/fraud_chains.json")
+        if chains_path.exists():
+            with open(chains_path, 'r') as f:
+                state.fraud_chains = json.load(f)
+            for chain in state.fraud_chains:
+                state.mule_accounts.update(chain.get('accounts', []))
+            _startup_logger.info(
+                "Loaded fraud chains",
+                event_type="fraud_chains_loaded",
+                metadata={
+                    "chains": len(state.fraud_chains),
+                    "mule_accounts": len(state.mule_accounts),
+                },
+            )
+        else:
+            _startup_logger.warning("Fraud chains file not found", event_type="fraud_chains_missing")
+        
+        # Load account profiles
+        accounts_path = Path("data/synthetic/accounts.json")
+        if accounts_path.exists():
+            with open(accounts_path, 'r') as f:
+                accounts_list = json.load(f)
+                state.account_profiles = {acc['account_id']: acc for acc in accounts_list}
+            _startup_logger.info(
+                "Loaded account profiles",
+                event_type="accounts_loaded",
+                metadata={"count": len(state.account_profiles)},
+            )
+        else:
+            _startup_logger.warning("Accounts file not found", event_type="accounts_missing")
+
+    except Exception as e:
+        _startup_logger.warning(
+            f"Error loading graph data: {e}",
+            event_type="graph_load_error",
+        )
+        state.graph_loaded = False
+
+    # Check model availability
+    if MODEL_AVAILABLE:
+        state.model_loaded = True
+        _startup_logger.info("Model components loaded successfully", event_type="model_ready")
+    else:
+        state.model_loaded = False
+        _startup_logger.warning(
+            "Running in DEMO MODE (install torch-geometric for full functionality)",
+            event_type="demo_mode",
+        )
+    
+    # Initialize innovation managers
+    if INNOVATIONS_AVAILABLE:
+        try:
+            state.voice_analyzer = VoiceStressAnalyzer()
+            _startup_logger.info("Voice Stress Analyzer initialized", event_type="innovation_ready")
+        except Exception as e:
+            _startup_logger.warning(
+                f"Voice analyzer initialization failed: {e}",
+                event_type="innovation_init_failed",
+            )
+
+        try:
+            state.mule_scorer = PredictiveMuleScorer()
+            _startup_logger.info("Predictive Mule Scorer initialized", event_type="innovation_ready")
+        except Exception as e:
+            _startup_logger.warning(
+                f"Mule scorer initialization failed: {e}",
+                event_type="innovation_init_failed",
+            )
+
+        try:
+            state.honeypot_manager = HoneypotEscrowManager()
+            _startup_logger.info("Honeypot Escrow Manager initialized", event_type="innovation_ready")
+        except Exception as e:
+            _startup_logger.warning(
+                f"Honeypot manager initialization failed: {e}",
+                event_type="innovation_init_failed",
+            )
+
+        try:
+            state.blockchain_manager = BlockchainEvidenceManager()
+            _startup_logger.info("Blockchain Evidence Manager initialized", event_type="innovation_ready")
+        except Exception as e:
+            _startup_logger.warning(
+                f"Blockchain manager initialization failed: {e}",
+                event_type="innovation_init_failed",
+            )
+
+        try:
+            state.aegis_oracle = AegisOracleExplainer()
+            _startup_logger.info("Aegis-Oracle Explainer initialized", event_type="innovation_ready")
+        except Exception as e:
+            _startup_logger.warning(
+                f"Aegis-Oracle initialization failed: {e}",
+                event_type="innovation_init_failed",
+            )
+        
+        try:
+            state.lateral_movement_detector = LateralMovementDetector()
+            _startup_logger.info("Lateral Movement Detector initialized", event_type="innovation_ready")
+        except Exception as e:
+            _startup_logger.warning(
+                f"Lateral movement initialization failed: {e}",
+                event_type="innovation_init_failed",
+            )
+    else:
+        _startup_logger.warning("Innovation modules not available", event_type="innovations_unavailable")
+
+    _startup_logger.info(
+        "AegisGraph Sentinel 2.0 is ready",
+        event_type="startup_complete",
+        metadata={
+            "mode": "PRODUCTION" if MODEL_AVAILABLE else "DEMO",
+            "graph_detection": state.graph_loaded,
+            "innovations": INNOVATIONS_AVAILABLE,
+        },
+    )
+    
+    print("=" * 80)
+    print("AegisGraph Sentinel 2.0 is ready")
+    print(f"Mode: {'PRODUCTION' if MODEL_AVAILABLE else 'DEMO'}")
+    print(f"Graph-based Detection: {'ENABLED' if state.graph_loaded else 'DISABLED'}")
+    print(f"Innovations: {'ENABLED' if INNOVATIONS_AVAILABLE else 'DISABLED'}")
+    print("API Documentation: http://localhost:8000/docs")
+    print("=" * 80)
+    
+    # Start background tasks. Save the handle so we can stop it cleanly on shutdown.
+    honeypot_task = asyncio.create_task(_honeypot_auto_release_loop())
+    
+    yield
+    
+    # Shutdown 
+    print("Shutting down AegisGraph Sentinel 2.0...")
+    honeypot_task.cancel()
+    try:
+        await honeypot_task
+    except asyncio.CancelledError:
+        pass
+    print("Background tasks stopped cleanly")
+
 # Initialize FastAPI app
 app = FastAPI(
     title="AegisGraph Sentinel 2.0",
@@ -415,6 +752,7 @@ app = FastAPI(
     version="2.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan
 )
 
 # CORS middleware
@@ -440,150 +778,18 @@ app.add_middleware(
     max_age=600,
 )
 
-# Global state
-class AppState:
-    """Application state"""
-    def __init__(self):
-        self.start_time = time.time()
-        self.requests_processed = 0
-        self.decisions = {"ALLOW": 0, "REVIEW": 0, "BLOCK": 0}
-        self.total_risk_score = 0.0
-        self.total_processing_time = 0.0
-        self.model_loaded = False
-        self.config = {}
-        # Graph-based fraud detection
-        self.transaction_graph = None
-        self.fraud_chains = []
-        self.mule_accounts = {'mule_acc_001', 'mule_acc_002', 'test_merchant', 'suspect_account_1', 'fraud_wallet_xyz'}
-        self.account_profiles = {}
-        self.graph_loaded = True  # Enable for demo
-        # Lateral movement detection - rolling betweenness centrality baseline
-        self.centrality_baseline = {}  # {account_id: [centrality_history]}
-        self.centrality_window_size = 10  # Track last 10 measurements
-        # Innovation managers
-        self.voice_analyzer = None
-        self.mule_scorer = None
-        self.honeypot_manager = None
-        self.blockchain_manager = None
-        self.aegis_oracle = None  # Explainability engine
-        
-state = AppState()
+# Rate Limiting
+limiter = Limiter(
+    key_func=get_remote_address,
+    default_limits=["100/minute"],
+)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
 
+register_exception_handlers(app)
+register_observability_middleware(app)
 
-@app.on_event("startup")
-async def startup_event():
-    """Initialize service on startup"""
-    print("=" * 80)
-    print("AegisGraph Sentinel 2.0 - Starting up...")
-    print("=" * 80)
-    
-    # Load configuration
-    config_path = Path("config/config.yaml")
-    if config_path.exists():
-        with open(config_path, 'r') as f:
-            state.config = yaml.safe_load(f)
-        print("✓ Configuration loaded")
-    else:
-        print("⚠ Configuration file not found, using defaults")
-        state.config = {}
-    
-    # Load synthetic fraud data for graph-based detection
-    try:
-        # Load transaction graph
-        graph_path = Path("data/synthetic/graph.gpickle")
-        if graph_path.exists():
-            with open(graph_path, 'rb') as f:
-                state.transaction_graph = pickle.load(f)
-            print(f"✓ Loaded transaction graph: {state.transaction_graph.number_of_nodes()} nodes, {state.transaction_graph.number_of_edges()} edges")
-            state.graph_loaded = True
-        else:
-            print("⚠ Graph file not found at data/synthetic/graph.gpickle")
-        
-        # Load fraud chains
-        chains_path = Path("data/synthetic/fraud_chains.json")
-        if chains_path.exists():
-            with open(chains_path, 'r') as f:
-                state.fraud_chains = json.load(f)
-            # Extract mule accounts from chains
-            for chain in state.fraud_chains:
-                state.mule_accounts.update(chain.get('accounts', []))
-            print(f"✓ Loaded {len(state.fraud_chains)} fraud chains with {len(state.mule_accounts)} mule accounts")
-        else:
-            print("⚠ Fraud chains file not found")
-        
-        # Load account profiles
-        accounts_path = Path("data/synthetic/accounts.json")
-        if accounts_path.exists():
-            with open(accounts_path, 'r') as f:
-                accounts_list = json.load(f)
-                state.account_profiles = {acc['account_id']: acc for acc in accounts_list}
-            print(f"✓ Loaded {len(state.account_profiles)} account profiles")
-        else:
-            print("⚠ Accounts file not found")
-            
-    except Exception as e:
-        print(f"⚠ Error loading graph data: {e}")
-        state.graph_loaded = False
-    
-    # Check model availability
-    if MODEL_AVAILABLE:
-        state.model_loaded = True
-        print("✓ Model components loaded successfully")
-    else:
-        state.model_loaded = False
-        print("⚠ Running in DEMO MODE (install torch-geometric for full functionality)")
-    
-    # Initialize innovation managers
-    if INNOVATIONS_AVAILABLE:
-        try:
-            state.voice_analyzer = VoiceStressAnalyzer()
-            print("✓ Voice Stress Analyzer initialized")
-        except Exception as e:
-            print(f"⚠ Voice analyzer initialization failed: {e}")
-        
-        try:
-            state.mule_scorer = PredictiveMuleScorer()
-            print("✓ Predictive Mule Scorer initialized")
-        except Exception as e:
-            print(f"⚠ Mule scorer initialization failed: {e}")
-        
-        try:
-            state.honeypot_manager = HoneypotEscrowManager()
-            print("✓ Honeypot Escrow Manager initialized")
-        except Exception as e:
-            print(f"⚠ Honeypot manager initialization failed: {e}")
-        
-        try:
-            state.blockchain_manager = BlockchainEvidenceManager()
-            print("✓ Blockchain Evidence Manager initialized")
-        except Exception as e:
-            print(f"⚠ Blockchain manager initialization failed: {e}")
-        
-        try:
-            state.aegis_oracle = AegisOracleExplainer()
-            print("✓ Aegis-Oracle Explainer initialized")
-        except Exception as e:
-            print(f"⚠ Aegis-Oracle initialization failed: {e}")
-    else:
-        print("⚠ Innovation modules not available")
-    
-    print("=" * 80)
-    print("🚀 AegisGraph Sentinel 2.0 is ready")
-    print(f"📊 Mode: {'PRODUCTION' if MODEL_AVAILABLE else 'DEMO'}")
-    print(f"🔗 Graph-based Detection: {'ENABLED' if state.graph_loaded else 'DISABLED'}")
-    print(f"🎯 Innovations: {'ENABLED' if INNOVATIONS_AVAILABLE else 'DISABLED'}")
-    print("📖 API Documentation: http://localhost:8000/docs")
-    print("=" * 80)
-    asyncio.ensure_future(_honeypot_auto_release_loop())
-
-async def _honeypot_auto_release_loop(interval_seconds: int = 60):
-    while True:
-        await asyncio.sleep(interval_seconds)
-        if state.honeypot_manager is not None:
-            try:
-                state.honeypot_manager.check_auto_release()
-            except Exception as exc:
-                print(f"⚠ Honeypot auto-release check failed: {exc}")
 
 
 @app.get("/", tags=["General"])
@@ -612,7 +818,7 @@ async def health_check_v1():
         innovations_available=INNOVATIONS_AVAILABLE,
         uptime_seconds=uptime,
         requests_processed=state.requests_processed,
-        timestamp=datetime.utcnow().isoformat() + 'Z',
+        timestamp=datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
     )
 
 @app.get("/health", response_model=HealthCheckResponse, tags=["General"])
@@ -632,7 +838,7 @@ async def health_check():
         innovations_available=INNOVATIONS_AVAILABLE,
         uptime_seconds=uptime,
         requests_processed=state.requests_processed,
-        timestamp=datetime.utcnow().isoformat() + 'Z',
+        timestamp=datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
     )
 
 
@@ -719,7 +925,10 @@ async def check_transaction(request: TransactionCheckRequest):
                             behavioral_stress_detected = True
                             
                 except Exception as e:
-                    print(f"Keystroke analysis failed: {e}")
+                    _api_logger.warning(
+                        f"Keystroke analysis failed: {e}",
+                        event_type="keystroke_analysis_error",
+                    )
         
         # Compute risk score
         risk_result = compute_risk_score(
@@ -727,6 +936,39 @@ async def check_transaction(request: TransactionCheckRequest):
             biometrics=biometrics,
         )
         
+        # --- NEW: LATERAL MOVEMENT INTEGRATION ---
+        if INNOVATIONS_AVAILABLE and state.lateral_movement_detector:
+            try:
+                # 1. Update the live temporal graph
+                state.lateral_movement_detector.update_graph(
+                    request.source_account,
+                    request.target_account
+                )
+                
+                # 2. Analyze the source account for centrality spikes
+                lm_risk_added, is_pivoting = state.lateral_movement_detector.analyze_account(
+                    request.source_account
+                )
+
+                # 3. Apply penalty if attacker is pivoting
+                if is_pivoting:
+                    current_score = risk_result.get('risk_score', 0.0)
+                    new_score = min(1.0, current_score + lm_risk_added)
+                    
+                    risk_result['risk_score'] = new_score
+                    risk_result['breakdown']['lateral_movement'] = lm_risk_added
+                    risk_result['lateral_movement_detected'] = True
+                    risk_result['lateral_movement_reason'] = "MITRE TA0008: Rapid centrality spike indicating network pivoting."
+                    
+                    # Escalate decision if thresholds are crossed
+                    if new_score >= 0.7:
+                        risk_result['decision'] = 'BLOCK'
+                    elif new_score >= 0.4 and risk_result['decision'] == 'ALLOW':
+                        risk_result['decision'] = 'REVIEW'
+            except Exception as e:
+                _api_logger.warning(f"Lateral movement check failed: {e}", event_type="lateral_movement_error")
+        # -----------------------------------------
+
         # Generate explanation
         explanation_result = generate_explanation(
             transaction=transaction,
@@ -775,10 +1017,19 @@ async def check_transaction(request: TransactionCheckRequest):
                     explanation_result['explanation'] = "Transaction approved (honeypot trap activated)"
                     explanation_result['recommended_action'] = "SHOW_SUCCESS_MONITOR_WITHDRAWAL"
                     
-                    print(f"🍯 Honeypot activated: {honeypot_id} for transaction {request.transaction_id}")
-                    
+                    _audit_logger.log_security_action(
+                        "honeypot_activated",
+                        metadata={
+                            "honeypot_id": honeypot_id,
+                            "transaction_id": request.transaction_id,
+                        },
+                    )
+
             except Exception as e:
-                print(f"Honeypot activation check failed: {e}")
+                _api_logger.warning(
+                    f"Honeypot activation check failed: {e}",
+                    event_type="honeypot_activation_error",
+                )
         
         # Innovation 6: Seal evidence in blockchain for high-risk transactions
         blockchain_evidence_id = None
@@ -811,10 +1062,19 @@ async def check_transaction(request: TransactionCheckRequest):
                         fraud_patterns=fraud_patterns,
                     )
                     blockchain_evidence_id = evidence.evidence_id
-                    print(f"⛓️ Evidence sealed in blockchain: {blockchain_evidence_id}")
-                    
+                    _audit_logger.log_security_action(
+                        "blockchain_evidence_sealed",
+                        metadata={
+                            "evidence_id": blockchain_evidence_id,
+                            "transaction_id": request.transaction_id,
+                        },
+                    )
+
             except Exception as e:
-                print(f"Blockchain sealing failed: {e}")
+                _api_logger.warning(
+                    f"Blockchain sealing failed: {e}",
+                    event_type="blockchain_seal_error",
+                )
         
         # Processing time
         processing_time_ms = (time.time() - start_time) * 1000
@@ -853,7 +1113,7 @@ async def check_transaction(request: TransactionCheckRequest):
             explanation=explanation_result['explanation'],
             recommended_action=explanation_result['recommended_action'],
             processing_time_ms=processing_time_ms,
-            timestamp=datetime.utcnow().isoformat() + 'Z',
+            timestamp=datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
             honeypot_activated=honeypot_activated,
             honeypot_id=honeypot_id,
             blockchain_evidence_id=blockchain_evidence_id,
@@ -865,7 +1125,25 @@ async def check_transaction(request: TransactionCheckRequest):
         if risk_result.get('lateral_movement_detected', False):
             lm_reason = risk_result.get('lateral_movement_reason', '')
             response.explanation = f"{response.explanation} | {lm_reason}"
-        
+
+        triggered_modules = []
+        if behavioral_stress_detected:
+            triggered_modules.append("behavioral_biometrics")
+        if honeypot_activated:
+            triggered_modules.append("honeypot_escrow")
+        if blockchain_evidence_id:
+            triggered_modules.append("blockchain_evidence")
+        _audit_logger.log_fraud_decision(
+            transaction_id=request.transaction_id,
+            decision=logic_decision,
+            risk_score=risk_result['risk_score'],
+            triggered_modules=triggered_modules,
+            metadata={
+                "api_decision": decision,
+                "confidence": risk_result.get('confidence'),
+            },
+        )
+
         return response
     
     except Exception as e:
@@ -878,7 +1156,7 @@ async def check_transaction(request: TransactionCheckRequest):
     summary="Generate AI-explainable decision explanation",
     description="Innovation 5: Aegis-Oracle generates regulatory-compliant explanations for all fraud decisions. Includes causal factors, evidence,  and legal admissibility."
 )
-async def explain_transaction(payload: dict):
+async def explain_transaction(request: ExplainRequest):
     """
     Generate comprehensive explanation for a fraud decision
     
@@ -901,29 +1179,29 @@ async def explain_transaction(payload: dict):
     try:
         # Extract transaction and risk info
         transaction = {
-            'transaction_id': payload.get('transaction_id', 'TXN_UNKNOWN'),
-            'source_account': payload.get('source_account'),
-            'target_account': payload.get('target_account'),
-            'amount': payload.get('amount', 0),
-            'currency': payload.get('currency', 'INR'),
-            'timestamp': payload.get('timestamp'),
-            'behavioral_stress_detected': payload.get('behavioral_stress_detected', False),
+            'transaction_id': request.transaction_id,
+            'source_account': request.source_account,
+            'target_account': request.target_account,
+            'amount': request.amount,
+            'currency': request.currency,
+            'timestamp': request.timestamp,
+            'behavioral_stress_detected': request.behavioral_stress_detected,
         }
         
         risk_assessment = {
-            'decision': payload.get('decision', 'ALLOW'),
-            'risk_score': payload.get('risk_score', 0.0),
-            'confidence': payload.get('confidence', 0.85),
+            'decision': request.decision,
+            'risk_score': request.risk_score,
+            'confidence': request.confidence,
         }
         
-        breakdown = payload.get('breakdown') or {
+        breakdown = request.breakdown.model_dump() if request.breakdown else {
             'graph': 0.0,
             'velocity': 0.0,
             'behavior': 0.0,
             'entropy': 0.0,
         }
         
-        innovations_triggered = payload.get('innovations_triggered', [])
+        innovations_triggered = request.innovations_triggered
         
         # Use Aegis-Oracle to generate explanation
         explanation = state.aegis_oracle.generate_explanation(
@@ -936,7 +1214,10 @@ async def explain_transaction(payload: dict):
         return explanation
         
     except Exception as e:
-        print(f"❌ Explanation error: {e}")
+        _api_logger.error(
+            f"Explanation error: {e}",
+            event_type="explain_error",
+        )
         raise HTTPException(status_code=500, detail=f"Explain error: {str(e)}")
 
 
@@ -947,7 +1228,7 @@ async def explain_transaction(payload: dict):
     summary="Get comprehensive AI reasoning for fraud decisions",
     description="Advanced Aegis-Oracle endpoint with full forensic analysis and causal reasoning"
 )
-async def oracle_explain_detailed(payload: dict):
+async def oracle_explain_detailed(request: OracleExplainRequest):
     """
     Advanced explainability endpoint with detailed forensic analysis
     
@@ -964,18 +1245,18 @@ async def oracle_explain_detailed(payload: dict):
     
     try:
         explanation = state.aegis_oracle.generate_explanation(
-            transaction=payload.get('transaction', {}),
-            risk_assessment=payload.get('risk_assessment', {}),
-            attention_weights=payload.get('attention_weights', {}),
-            break_down=payload.get('risk_breakdown', {}),
-            innovations_triggered=payload.get('innovations_triggered', []),
+            transaction=request.transaction,
+            risk_assessment=request.risk_assessment,
+            attention_weights=request.attention_weights,
+            break_down=request.risk_breakdown,
+            innovations_triggered=request.innovations_triggered,
         )
         
         return {
             'oracle_reasoning': explanation,
             'forensic_ready': True,
             'legal_admissible': True,
-            'timestamp': datetime.utcnow().isoformat() + 'Z',
+            'timestamp': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
         }
         
     except Exception as e:
@@ -991,18 +1272,18 @@ if os.getenv("DEBUG", "false").lower() == "true":
         summary="Force honeypot activation (DEBUG mode only)",
         description="Available only when DEBUG env var is 'true'. For testing only.",
     )
-    def debug_activate_honeypot(payload: dict):
+    def debug_activate_honeypot(request: HoneypotDebugRequest):
         if state.honeypot_manager is None:
             raise HTTPException(status_code=500, detail="Honeypot manager not initialized")
         try:
             hp = state.honeypot_manager.activate_honeypot(
-                transaction_id=payload.get('transaction_id', 'DEBUG'),
-                source_account=payload.get('source_account', 'SRC'),
-                target_account=payload.get('target_account', 'TGT'),
-                amount=payload.get('amount', 0.0),
-                currency=payload.get('currency', 'INR'),
-                risk_score=payload.get('risk_score', 1.0),
-                fraud_indicators=payload.get('fraud_indicators', []),
+                transaction_id=request.transaction_id,
+                source_account=request.source_account,
+                target_account=request.target_account,
+                amount=request.amount,
+                currency=request.currency,
+                risk_score=request.risk_score,
+                fraud_indicators=request.fraud_indicators,
             )
             return {'honeypot_id': hp.honeypot_id, 'status': hp.status.value}
         except Exception as e:
@@ -1034,7 +1315,10 @@ async def check_batch_transactions(request: BatchTransactionRequest):
             stats[result.decision.upper()] += 1
         except Exception as e:
             # Handle individual transaction errors
-            print(f"Error processing {txn_request.transaction_id}: {e}")
+            _api_logger.error(
+                f"Error processing batch transaction {txn_request.transaction_id}: {e}",
+                event_type="batch_processing_error",
+            )
             continue
     
     processing_time_ms = (time.time() - start_time) * 1000
@@ -1088,7 +1372,7 @@ async def get_model_info():
     summary="Analyze voice stress during transaction",
     description="Innovation 5: Detects phone coercion through acoustic stress analysis"
 )
-async def analyze_voice(request: VoiceAnalysisRequest):
+def analyze_voice(request: VoiceAnalysisRequest):
     """
     Analyze voice recording for stress and coercion indicators
     
@@ -1145,7 +1429,7 @@ async def analyze_voice(request: VoiceAnalysisRequest):
     summary="Score account opening for mule risk",
     description="Innovation 4: Predicts mule accounts before first transaction using 12 features"
 )
-async def score_account_opening(request: AccountOpeningRequest):
+def score_account_opening(request: AccountOpeningRequest):
     """
     Score a new account opening for mule recruitment risk
     
@@ -1206,9 +1490,9 @@ async def score_account_opening(request: AccountOpeningRequest):
     summary="Assess account mule risk",
     description="Innovation 3: Alias for mule assessment endpoint"
 )
-async def assess_mule_risk(request: AccountOpeningRequest):
+def assess_mule_risk(request: AccountOpeningRequest):
     """Alias endpoint for mule assessment"""
-    return await score_account_opening(request)
+    return score_account_opening(request)
 
 
 @app.get(
@@ -1406,32 +1690,6 @@ async def export_legal_evidence(request: LegalExportRequest):
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Evidence export failed: {str(e)}")
-
-
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException):
-    """Custom HTTP exception handler"""
-    return JSONResponse(
-        status_code=exc.status_code,
-        content=ErrorResponse(
-            error=exc.detail,
-            detail=None,
-            timestamp=datetime.utcnow().isoformat() + 'Z',
-        ).model_dump(),
-    )
-
-
-@app.exception_handler(Exception)
-async def general_exception_handler(request: Request, exc: Exception):
-    """General exception handler"""
-    return JSONResponse(
-        status_code=500,
-        content=ErrorResponse(
-            error="Internal server error",
-            detail=str(exc),
-            timestamp=datetime.utcnow().isoformat() + 'Z',
-        ).model_dump(),
-    )
 
 
 def main():

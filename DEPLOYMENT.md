@@ -350,36 +350,6 @@ for i in range(100):
 
 ---
 
-## 🐳 Docker Deployment (Future)
-
-```dockerfile
-# Dockerfile example
-FROM python:3.9-slim
-
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-
-COPY . .
-
-CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
-```
-
-```yaml
-# docker-compose.yaml example
-version: '3.8'
-services:
-  api:
-    build: .
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./data:/app/data
-      - ./models:/app/models
-      - ./logs:/app/logs
-    environment:
-      - CUDA_VISIBLE_DEVICES=0
-```
 
 ---
 
@@ -486,11 +456,10 @@ python example_training.py
 4. Add new API endpoints in `src/api/main.py`
 
 ### For Production
-1. Deploy with Docker/Kubernetes
-2. Set up CI/CD pipeline
-3. Implement monitoring (Prometheus, Grafana)
-4. Add logging aggregation (ELK stack)
-5. Schedule regular model retraining
+1. Set up CI/CD pipeline
+2. Implement monitoring (Prometheus, Grafana)
+3. Add logging aggregation (ELK stack)
+4. Schedule regular model retraining
 
 ### For Research
 1. Experiment with different GNN architectures

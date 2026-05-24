@@ -227,7 +227,7 @@ pip install -r requirements.txt
 1. **Explore the API**: Visit http://localhost:8000/docs
 2. **Generate Data**: Run the data generator
 3. **Train Model**: Prepare your dataset and train
-4. **Deploy**: Use Docker for production deployment
+4. **Deploy**: Run the API server in production
 
 ## Support
 
