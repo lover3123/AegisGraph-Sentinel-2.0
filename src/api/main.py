@@ -799,6 +799,56 @@ def _run_scoring_pipeline(
     return risk_result
 
 
+def _activate_honeypot_sync(
+    honeypot_manager,
+    transaction_id: str,
+    source_account: str,
+    target_account: str,
+    amount: float,
+    currency: str,
+    risk_score: float,
+    fraud_indicators: list,
+):
+    """Synchronous honeypot activation safe to run in executor."""
+    return honeypot_manager.activate_honeypot(
+        transaction_id=transaction_id,
+        source_account=source_account,
+        target_account=target_account,
+        amount=amount,
+        currency=currency,
+        risk_score=risk_score,
+        fraud_indicators=fraud_indicators,
+    )
+
+
+def _seal_blockchain_sync(
+    blockchain_manager,
+    transaction_id: str,
+    source_account: str,
+    target_account: str,
+    amount: float,
+    risk_score: float,
+    decision: str,
+    confidence: float,
+    breakdown: dict,
+    explanation: str,
+    fraud_patterns: list,
+):
+    """Synchronous blockchain sealing safe to run in executor."""
+    return blockchain_manager.seal_evidence(
+        transaction_id=transaction_id,
+        source_account=source_account,
+        target_account=target_account,
+        amount=amount,
+        risk_score=risk_score,
+        decision=decision,
+        confidence=confidence,
+        breakdown=breakdown,
+        explanation=explanation,
+        fraud_patterns=fraud_patterns,
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -1075,14 +1125,19 @@ async def check_transaction(request: TransactionCheckRequest):
                 logic_decision = 'ALLOW' if risk_result['decision'] == 'APPROVE' else risk_result['decision']
                 if should_activate and logic_decision == 'BLOCK':
                     # Activate honeypot
-                    honeypot = state.honeypot_manager.activate_honeypot(
-                        transaction_id=request.transaction_id,
-                        source_account=request.source_account,
-                        target_account=request.target_account,
-                        amount=request.amount,
-                        currency=request.currency,
-                        risk_score=risk_result['risk_score'],
-                        fraud_indicators=fraud_indicators,
+                    honeypot = await loop.run_in_executor(
+                        None,
+                        partial(
+                            _activate_honeypot_sync,
+                            state.honeypot_manager,
+                            request.transaction_id,
+                            request.source_account,
+                            request.target_account,
+                            request.amount,
+                            request.currency,
+                            risk_result['risk_score'],
+                            fraud_indicators,
+                        ),
                     )
                     honeypot_activated = True
                     honeypot_id = honeypot.honeypot_id
@@ -1124,17 +1179,22 @@ async def check_transaction(request: TransactionCheckRequest):
                     if 'circular' in explanation_result['explanation'].lower():
                         fraud_patterns.append('circular_flow')
                     
-                    evidence = state.blockchain_manager.seal_evidence(
-                        transaction_id=request.transaction_id,
-                        source_account=request.source_account,
-                        target_account=request.target_account,
-                        amount=request.amount,
-                        risk_score=risk_result['risk_score'],
-                        decision=risk_result['decision'],
-                        confidence=risk_result['confidence'],
-                        breakdown=risk_result['breakdown'],
-                        explanation=explanation_result['explanation'],
-                        fraud_patterns=fraud_patterns,
+                    evidence = await loop.run_in_executor(
+                        None,
+                        partial(
+                            _seal_blockchain_sync,
+                            state.blockchain_manager,
+                            request.transaction_id,
+                            request.source_account,
+                            request.target_account,
+                            request.amount,
+                            risk_result['risk_score'],
+                            risk_result['decision'],
+                            risk_result['confidence'],
+                            risk_result['breakdown'],
+                            explanation_result['explanation'],
+                            fraud_patterns,
+                        ),
                     )
                     blockchain_evidence_id = evidence.evidence_id
                     _audit_logger.log_security_action(
