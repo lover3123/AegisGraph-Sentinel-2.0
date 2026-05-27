@@ -171,11 +171,10 @@ class TestSuperMuleDetection:
              'timestamp': datetime.now(timezone.utc)},
         ]
 
-        # Single transfer results in normalized PageRank of 1.0 for receiver
-        # Use higher threshold to filter out single-transfer false positives
-        super_mules = detector.detect_super_mules(transactions, pagerank_threshold=0.9)
+        # Single transfer should not create super-mule (in_degree must be > 1)
+        super_mules = detector.detect_super_mules(transactions, pagerank_threshold=0.7)
         
-        # Should be empty with high threshold
+        # Should be empty - single transfer node has in_degree=1
         assert len(super_mules) == 0
 
     def test_super_mule_high_incoming_transfers(self, detector):

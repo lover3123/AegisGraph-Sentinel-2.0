@@ -652,13 +652,16 @@ class FraudPatternDetector:
             
             # Find super-mules: high PageRank + high volume
             for account, pr_score in normalized_pr.items():
-                if pr_score >= pagerank_threshold:
+                in_degree = graph.in_degree(account)
+                
+                # Filter out single-transfer false positives
+                # A true super-mule must have multiple incoming transfers
+                if pr_score >= pagerank_threshold and in_degree > 1:
                     volume = normalized_volumes.get(account, 0.0)
                     
                     # Score: weighted combination of PageRank and volume
                     super_mule_score = (0.6 * pr_score) + (0.4 * volume)
                     
-                    in_degree = graph.in_degree(account)
                     total_received = incoming_volumes.get(account, 0.0)
                     
                     detected_super_mules.append({
