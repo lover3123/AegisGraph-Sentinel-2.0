@@ -3,7 +3,64 @@ FastAPI Application for AegisGraph Sentinel 2.0
 
 Real-time fraud detection API service
 """
-def _require_legal_export_authorization(authorization_token: str | None) -> None:
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import hmac
+import json
+import os
+import time
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from enum import Enum
+from functools import partial
+from pathlib import Path
+from typing import Optional
+
+import networkx as nx
+import numpy as np
+import uvicorn
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from slowapi.util import get_remote_address
+
+from ..config.settings import get_settings
+from ..config.validation import validate_environment
+from ..exceptions import register_exception_handlers, register_observability_middleware
+from ..observability import get_audit_logger, get_logger
+from ..runtime import LifecycleManager, RuntimeState
+from ..runtime.background_tasks import honeypot_auto_release_loop
+from .schemas import (
+    AccountOpeningRequest,
+    AccountOpeningResponse,
+    BatchTransactionRequest,
+    BatchTransactionResponse,
+    BlockchainEvidenceResponse,
+    BlockchainSealRequest,
+    BlockchainVerificationResponse,
+    ExplainRequest,
+    HealthCheckResponse,
+    HoneypotDebugRequest,
+    HoneypotListResponse,
+    HoneypotStatsResponse,
+    LegalExportRequest,
+    LegalExportResponse,
+    OracleExplainRequest,
+    RiskBreakdown,
+    StatsResponse,
+    TransactionCheckRequest,
+    TransactionCheckResponse,
+    VoiceAnalysisRequest,
+    VoiceAnalysisResponse,
+    HoneypotStatus,
+)
+
+def _require_legal_export_authorization(authorization_token: Optional[str]) -> None:
     """Legacy wrapper: ensure a provided authorization token matches configured hash.
 
     This function is kept for backward compatibility with callers that only
@@ -26,9 +83,9 @@ def _require_legal_export_authorization(authorization_token: str | None) -> None
 
 
 def _extract_legal_export_token(
-    authorization: str | None,
-    x_legal_export_token: str | None,
-) -> str | None:
+    authorization: Optional[str],
+    x_legal_export_token: Optional[str],
+) -> Optional[str]:
     if authorization:
         scheme, _, credentials = authorization.partition(" ")
         if scheme.lower() == "bearer" and credentials.strip():
@@ -40,7 +97,7 @@ def _extract_legal_export_token(
     return None
 
 
-def _parse_request_timestamp(raw_timestamp: str | None) -> datetime | None:
+def _parse_request_timestamp(raw_timestamp: Optional[str]) -> Optional[datetime]:
     if not raw_timestamp:
         return None
 
@@ -58,9 +115,9 @@ def _parse_request_timestamp(raw_timestamp: str | None) -> datetime | None:
 
 
 def _validate_legal_export_request(
-    authorization: str | None,
-    x_legal_export_token: str | None,
-    x_request_timestamp: str | None,
+    authorization: Optional[str],
+    x_legal_export_token: Optional[str],
+    x_request_timestamp: Optional[str],
 ) -> None:
     request_timestamp = _parse_request_timestamp(x_request_timestamp)
     if request_timestamp is None:
@@ -134,7 +191,7 @@ def _require_honeypot_admin(x_honeypot_token: Optional[str]) -> None:
         raise HTTPException(status_code=403, detail="Unauthorized honeypot request")
 
 
-def _require_legal_export_authorization(authorization_token: str | None) -> None:
+def _require_legal_export_authorization(authorization_token: Optional[str]) -> None:
     """Legacy wrapper: ensure a provided authorization token matches configured hash.
 
     This function is kept for backward compatibility with callers that only
@@ -157,9 +214,9 @@ def _require_legal_export_authorization(authorization_token: str | None) -> None
 
 
 def _extract_legal_export_token(
-    authorization: str | None,
-    x_legal_export_token: str | None,
-) -> str | None:
+    authorization: Optional[str],
+    x_legal_export_token: Optional[str],
+) -> Optional[str]:
     if authorization:
         scheme, _, credentials = authorization.partition(" ")
         if scheme.lower() == "bearer" and credentials.strip():
@@ -171,7 +228,7 @@ def _extract_legal_export_token(
     return None
 
 
-def _parse_request_timestamp(raw_timestamp: str | None) -> datetime | None:
+def _parse_request_timestamp(raw_timestamp: Optional[str]) -> Optional[datetime]:
     if not raw_timestamp:
         return None
 
@@ -189,9 +246,9 @@ def _parse_request_timestamp(raw_timestamp: str | None) -> datetime | None:
 
 
 def _validate_legal_export_request(
-    authorization: str | None,
-    x_legal_export_token: str | None,
-    x_request_timestamp: str | None,
+    authorization: Optional[str],
+    x_legal_export_token: Optional[str],
+    x_request_timestamp: Optional[str],
 ) -> None:
     request_timestamp = _parse_request_timestamp(x_request_timestamp)
     if request_timestamp is None:
@@ -411,7 +468,7 @@ except (ImportError, SyntaxError) as e:
                                 metadata={"pattern": "chain", "chain_length": chain_length},
                             )
                 except Exception as e:
-                    logger.error(f"Error in graph pattern analysis: {e}")
+                    _api_logger.error(f"Error in graph pattern analysis: {e}")
                     pass
                 except:
                     print(f"⚠️ Chain pattern: {source_account} is part of a {chain_length}-hop chain")
@@ -1975,9 +2032,9 @@ async def verify_evidence(evidence_id: str, block_number: int):
 async def export_legal_evidence(
     request: Request,
     export_request: LegalExportRequest,
-    authorization: str | None = Header(default=None, alias="Authorization"),
-    x_legal_export_token: str | None = Header(default=None, alias="X-Legal-Export-Token"),
-    x_request_timestamp: str | None = Header(default=None, alias="X-Request-Timestamp"),
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+    x_legal_export_token: Optional[str] = Header(default=None, alias="X-Legal-Export-Token"),
+    x_request_timestamp: Optional[str] = Header(default=None, alias="X-Request-Timestamp"),
 ):
     """
     Export blockchain evidence for legal proceedings
