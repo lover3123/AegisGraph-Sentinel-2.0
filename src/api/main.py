@@ -12,6 +12,7 @@ import hmac
 import json
 import os
 import time
+from importlib import import_module
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from enum import Enum
@@ -24,10 +25,50 @@ import numpy as np
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.errors import RateLimitExceeded
-from slowapi.middleware import SlowAPIMiddleware
-from slowapi.util import get_remote_address
+
+try:
+    _slowapi = import_module("slowapi")
+    _slowapi_errors = import_module("slowapi.errors")
+    _slowapi_middleware = import_module("slowapi.middleware")
+    _slowapi_util = import_module("slowapi.util")
+
+    Limiter = _slowapi.Limiter
+    _rate_limit_exceeded_handler = _slowapi._rate_limit_exceeded_handler
+    RateLimitExceeded = _slowapi_errors.RateLimitExceeded
+    SlowAPIMiddleware = _slowapi_middleware.SlowAPIMiddleware
+    get_remote_address = _slowapi_util.get_remote_address
+    SLOWAPI_AVAILABLE = True
+except ImportError as e:
+    SLOWAPI_AVAILABLE = False
+
+    class RateLimitExceeded(Exception):
+        pass
+
+    class Limiter:
+        def __init__(self, *args, **kwargs):
+            self.key_func = kwargs.get("key_func")
+
+        def limit(self, *args, **kwargs):
+            def decorator(func):
+                return func
+
+            return decorator
+
+    class SlowAPIMiddleware:
+        def __init__(self, app, *args, **kwargs):
+            self.app = app
+
+        async def __call__(self, scope, receive, send):
+            await self.app(scope, receive, send)
+
+    def get_remote_address(request):
+        client = getattr(request, "client", None)
+        return getattr(client, "host", "unknown")
+
+    async def _rate_limit_exceeded_handler(request, exc):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+
+    print(f"SlowAPI not available ({e}); rate limiting disabled")
 
 from ..config.settings import get_settings
 from ..config.validation import validate_environment
@@ -1145,8 +1186,9 @@ limiter = Limiter(
     default_limits=["100/minute"],
 )
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-app.add_middleware(SlowAPIMiddleware)
+if SLOWAPI_AVAILABLE:
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    app.add_middleware(SlowAPIMiddleware)
 
 register_exception_handlers(app)
 register_observability_middleware(app)
