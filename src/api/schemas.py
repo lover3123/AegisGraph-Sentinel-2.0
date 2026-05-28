@@ -3,9 +3,16 @@ Pydantic schemas for API request/response validation
 """
 # Schema validation for all fraud detection endpoints
 
-from pydantic import BaseModel, Field, field_validator, AliasChoices, ConfigDict
+from pydantic import BaseModel, Field, field_validator, model_validator, AliasChoices, ConfigDict
 from typing import Optional, List, Dict, Union
 from datetime import datetime
+
+from src.api.validators import (
+    TransactionValidator,
+    ValidationError,
+    VALID_CURRENCY_CODES,
+    VALID_MODES,
+)
 
 
 class BiometricsData(BaseModel):
@@ -15,11 +22,14 @@ class BiometricsData(BaseModel):
     keystroke_events: Optional[List[Dict]] = Field(default=None, description="Raw keystroke events")
     mouse_movements: Optional[List[Dict]] = Field(default=None, description="Raw mouse movement events")
     
-    @field_validator('hold_times', 'flight_times') #ready
+    @field_validator('hold_times', 'flight_times')
     @classmethod
-    def validate_positive(cls, v):
-        if any(x < 0 for x in v):
-            raise ValueError("Times must be non-negative")
+    def validate_biometric_values(cls, v):
+        """Validate biometric array constraints."""
+        if len(v) > 1000:
+            raise ValueError("Biometric arrays cannot exceed 1000 elements")
+        if any(x < 0 or x > 10000 for x in v):
+            raise ValueError("Biometric values must be between 0 and 10000 milliseconds")
         return v
 
 
@@ -57,12 +67,89 @@ class TransactionCheckRequest(BaseModel):
     )
     amount: float = Field(gt=0, description="Transaction amount")
     currency: str = Field(default="INR", description="Currency code")
-    mode: str = Field(default="payment", description="Transaction mode (UPI, IMPS, NEFT, etc.)")
+    mode: str = Field(default="UPI", description="Transaction mode (UPI, IMPS, NEFT, etc.)")
     timestamp: Union[str, float] = Field(description="Transaction timestamp (ISO format or epoch seconds)")
     device_id: Optional[str] = Field(default=None, description="Device identifier")
     biometrics: Optional[BiometricsData] = Field(default=None, description="Behavioral biometrics")
     ip_address: Optional[str] = Field(default=None, description="IP address")
     location: Optional[str] = Field(default=None, description="Transaction location")
+    
+    @field_validator('amount')
+    @classmethod
+    def validate_amount(cls, v):
+        """Validate transaction amount."""
+        try:
+            TransactionValidator.validate_amount(v)
+        except ValidationError as e:
+            raise ValueError(e.suggestion) from e
+        return v
+    
+    @field_validator('timestamp')
+    @classmethod
+    def validate_timestamp(cls, v):
+        """Validate and normalize timestamp to ISO 8601 format."""
+        # Convert Unix epoch to ISO format if needed
+        if isinstance(v, (int, float)):
+            from datetime import datetime, timezone
+            dt = datetime.fromtimestamp(v, tz=timezone.utc)
+            v = dt.isoformat()
+        
+        try:
+            TransactionValidator.validate_timestamp(v)
+        except ValidationError as e:
+            raise ValueError(e.suggestion) from e
+        return v
+    
+    @field_validator('source_account')
+    @classmethod
+    def validate_source_account(cls, v):
+        """Validate source account format."""
+        try:
+            TransactionValidator.validate_account_id(v, "source_account")
+        except ValidationError as e:
+            raise ValueError(e.suggestion) from e
+        return v
+    
+    @field_validator('target_account')
+    @classmethod
+    def validate_target_account(cls, v):
+        """Validate target account format."""
+        try:
+            TransactionValidator.validate_account_id(v, "target_account")
+        except ValidationError as e:
+            raise ValueError(e.suggestion) from e
+        return v
+    
+    @field_validator('currency')
+    @classmethod
+    def validate_currency(cls, v):
+        """Validate currency code."""
+        try:
+            TransactionValidator.validate_currency_code(v)
+        except ValidationError as e:
+            raise ValueError(e.suggestion) from e
+        return v
+    
+    @field_validator('mode')
+    @classmethod
+    def validate_mode(cls, v):
+        """Validate transaction mode."""
+        try:
+            TransactionValidator.validate_mode(v)
+        except ValidationError as e:
+            raise ValueError(e.suggestion) from e
+        return v
+    
+    @model_validator(mode='after')
+    def validate_cross_fields(self):
+        """Validate cross-field constraints."""
+        try:
+            TransactionValidator.validate_cross_fields(
+                self.source_account, self.target_account
+            )
+        except ValidationError as e:
+            raise ValueError(e.suggestion) from e
+        return self
     
 
 

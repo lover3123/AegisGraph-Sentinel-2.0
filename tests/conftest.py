@@ -1,6 +1,6 @@
 """Shared pytest fixtures for the AegisGraph Sentinel 2.0 test suite.
 
-Two concerns handled here:
+Three concerns handled here:
 
 1. ``api_client`` — the original fixture (restored verbatim from the
    maintainer's commit). Runs the app lifespan via TestClient's context
@@ -16,6 +16,9 @@ Two concerns handled here:
    installs a dependency override that no-ops the gate for every test
    file *except* test_api_auth.py — those tests exercise the real gate
    and need the dependency to fire.
+
+3. Conditional imports for optional dependencies (torch, pandas) to allow
+   tests to run even when these heavy dependencies are not installed.
 """
 
 from __future__ import annotations
@@ -26,6 +29,22 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.api.main import app
+
+# Check if torch is available
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+
+# Skip torch tests if torch is not available
+def pytest_collection_modifyitems(config, items):
+    """Skip torch-marked tests if torch is not available."""
+    if not TORCH_AVAILABLE:
+        skip_torch = pytest.mark.skip(reason="PyTorch not installed")
+        for item in items:
+            if "torch" in item.keywords or item.parent and "torch" in item.parent.name:
+                item.add_marker(skip_torch)
 
 
 # Files whose tests should exercise the real API key gate. The autouse

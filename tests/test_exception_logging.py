@@ -239,7 +239,7 @@ class TestApiIntegration:
         payload = {
             "transaction_id": "compat_001",
             "amount": 100.0,
-            "timestamp": 1234567890.0,
+            "timestamp": 1779883200.0,
             "from_account": "user_a",
             "to_account": "user_b",
         }
