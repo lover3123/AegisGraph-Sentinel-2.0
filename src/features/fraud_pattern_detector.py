@@ -798,8 +798,15 @@ class FraudPatternDetector:
         detected_rings = []
         
         try:
-            # Find all maximal cliques (cached for performance)
-            cliques_cached = self.cache.cache_find_cliques(undirected_graph, ttl=900)
+            pruned_graph = self._prune_graph_for_clique_search(
+                undirected_graph,
+                min_clique_size=min_clique_size,
+            )
+            if len(pruned_graph.nodes()) < min_clique_size:
+                return []
+
+            # Find all maximal cliques on the pruned subgraph.
+            cliques_cached = self.cache.cache_find_cliques(pruned_graph, ttl=900)
             cliques = [list(c) for c in cliques_cached]  # Convert frozensets back to lists
             
             for clique in cliques:
@@ -842,6 +849,36 @@ class FraudPatternDetector:
             logger.warning("Error in fraud ring detection: %s", e)
         
         return sorted(detected_rings, key=lambda x: x['risk_score'], reverse=True)
+
+    def _prune_graph_for_clique_search(
+        self,
+        graph: nx.Graph,
+        min_clique_size: int,
+    ) -> nx.Graph:
+        """
+        Prune nodes that cannot belong to a clique of size min_clique_size.
+
+        A node in a clique of size k must have degree at least k - 1 inside the
+        induced subgraph, so we first remove nodes below that bound and then
+        apply a k-core reduction to collapse the remaining low-degree fringe.
+        """
+        if min_clique_size <= 2 or len(graph) == 0:
+            return graph
+
+        required_degree = min_clique_size - 1
+        degree_filtered = graph.subgraph(
+            [node for node, degree in graph.degree() if degree >= required_degree]
+        ).copy()
+
+        if len(degree_filtered) < min_clique_size:
+            return degree_filtered
+
+        try:
+            return nx.k_core(degree_filtered, k=required_degree)
+        except nx.NetworkXError:
+            # If the graph becomes too sparse after filtering, fall back to the
+            # degree-pruned subgraph rather than failing the entire detector.
+            return degree_filtered
 
     def apply_temporal_decay_to_pattern(
         self,
