@@ -16,7 +16,7 @@ import hashlib
 import hmac
 import os
 import asyncio
-from fastapi import FastAPI, HTTPException, Request, Header
+from fastapi import Depends, FastAPI, HTTPException, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
@@ -66,6 +66,7 @@ from .schemas import (
     OracleExplainRequest,
     HoneypotDebugRequest,
 )
+from .security import require_api_key
 
 from ..exceptions import register_exception_handlers, register_observability_middleware
 from ..observability import get_audit_logger, get_logger
@@ -1094,7 +1095,8 @@ async def get_stats():
     response_model=TransactionCheckResponse,
     tags=["Fraud Detection"],
     summary="Check transaction for fraud",
-    description="Analyze a single transaction for fraud risk using HTGNN and behavioral biometrics"
+    description="Analyze a single transaction for fraud risk using HTGNN and behavioral biometrics",
+    dependencies=[Depends(require_api_key)]
 )
 async def check_transaction(request: TransactionCheckRequest):
     """
@@ -1346,7 +1348,8 @@ async def check_transaction(request: TransactionCheckRequest):
     "/api/v1/explain",
     tags=["Explainability - Aegis-Oracle"],
     summary="Generate AI-explainable decision explanation",
-    description="Innovation 5: Aegis-Oracle generates regulatory-compliant explanations for all fraud decisions. Includes causal factors, evidence,  and legal admissibility."
+    description="Innovation 5: Aegis-Oracle generates regulatory-compliant explanations for all fraud decisions. Includes causal factors, evidence,  and legal admissibility.",
+    dependencies=[Depends(require_api_key)]
 )
 async def explain_transaction(request: ExplainRequest):
     """
@@ -1418,7 +1421,8 @@ async def explain_transaction(request: ExplainRequest):
     "/api/v1/oracle/explain",
     tags=["Explainability - Aegis-Oracle"],
     summary="Get comprehensive AI reasoning for fraud decisions",
-    description="Advanced Aegis-Oracle endpoint with full forensic analysis and causal reasoning"
+    description="Advanced Aegis-Oracle endpoint with full forensic analysis and causal reasoning",
+    dependencies=[Depends(require_api_key)]
 )
 async def oracle_explain_detailed(request: OracleExplainRequest):
     """
@@ -1485,7 +1489,8 @@ if settings.runtime.debug:
     response_model=BatchTransactionResponse,
     tags=["Fraud Detection"],
     summary="Check multiple transactions",
-    description="Batch processing of multiple transactions for fraud detection"
+    description="Batch processing of multiple transactions for fraud detection",
+    dependencies=[Depends(require_api_key)]
 )
 async def check_batch_transactions(request: BatchTransactionRequest):
     """
@@ -1545,7 +1550,7 @@ async def check_batch_transactions(request: BatchTransactionRequest):
     )
 
 
-@app.get("/api/v1/model/info", tags=["Model"])
+@app.get("/api/v1/model/info", tags=["Model"], dependencies=[Depends(require_api_key)])
 async def get_model_info():
     """
     Get information about the loaded model
@@ -1582,7 +1587,8 @@ async def get_model_info():
     response_model=VoiceAnalysisResponse,
     tags=["Innovation - Voice Stress"],
     summary="Analyze voice stress during transaction",
-    description="Innovation 5: Detects phone coercion through acoustic stress analysis"
+    description="Innovation 5: Detects phone coercion through acoustic stress analysis",
+    dependencies=[Depends(require_api_key)]
 )
 def analyze_voice(request: VoiceAnalysisRequest):
     """
@@ -1640,7 +1646,8 @@ def analyze_voice(request: VoiceAnalysisRequest):
     response_model=AccountOpeningResponse,
     tags=["Innovation - Predictive Mule"],
     summary="Score account opening for mule risk",
-    description="Innovation 4: Predicts mule accounts before first transaction using 12 features"
+    description="Innovation 4: Predicts mule accounts before first transaction using 12 features",
+    dependencies=[Depends(require_api_key)]
 )
 def score_account_opening(request: AccountOpeningRequest):
     """
@@ -1701,7 +1708,8 @@ def score_account_opening(request: AccountOpeningRequest):
     response_model=AccountOpeningResponse,
     tags=["Innovation - Predictive Mule"],
     summary="Assess account mule risk",
-    description="Innovation 3: Alias for mule assessment endpoint"
+    description="Innovation 3: Alias for mule assessment endpoint",
+    dependencies=[Depends(require_api_key)]
 )
 def assess_mule_risk(request: AccountOpeningRequest):
     """Alias endpoint for mule assessment"""
@@ -1802,7 +1810,8 @@ async def get_honeypot_stats(
     response_model=BlockchainEvidenceResponse,
     tags=["Innovation - Blockchain Evidence"],
     summary="Seal evidence in blockchain",
-    description="Innovation 6: Create immutable evidence record for legal admissibility"
+    description="Innovation 6: Create immutable evidence record for legal admissibility",
+    dependencies=[Depends(require_api_key)]
 )
 async def seal_evidence(request: BlockchainSealRequest):
     """
@@ -1848,7 +1857,8 @@ async def seal_evidence(request: BlockchainSealRequest):
     response_model=BlockchainVerificationResponse,
     tags=["Innovation - Blockchain Evidence"],
     summary="Verify blockchain evidence",
-    description="Innovation 6: Verify integrity and authenticity of sealed evidence"
+    description="Innovation 6: Verify integrity and authenticity of sealed evidence",
+    dependencies=[Depends(require_api_key)]
 )
 async def verify_evidence(evidence_id: str, block_number: int):
     """
