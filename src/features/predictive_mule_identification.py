@@ -485,6 +485,10 @@ class PredictiveMuleScorer:
             if a.opening_timestamp > cutoff
         ]
         
+        # Limit to prevent memory exhaustion
+        if len(self.recent_openings) > self.MAX_HISTORY_SIZE * 10:
+            self.recent_openings = self.recent_openings[-self.MAX_HISTORY_SIZE * 10:]
+        
         # Update device history
         device_id = account_data.device_id
         self.device_history[device_id] = self.device_history.get(device_id, 0) + 1
