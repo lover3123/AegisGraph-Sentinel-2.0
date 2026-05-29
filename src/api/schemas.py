@@ -4,9 +4,7 @@ Pydantic schemas for API request/response validation
 # Schema validation for all fraud detection endpoints
 
 from pydantic import BaseModel, Field, field_validator, model_validator, AliasChoices, ConfigDict
-from typing import Optional, List, Dict, Union
-from datetime import datetime
-
+from typing import Optional, List, Dict, Union, Any
 from src.api.validators import (
     TransactionValidator,
     ValidationError,
@@ -68,7 +66,7 @@ class TransactionCheckRequest(BaseModel):
     amount: float = Field(gt=0, description="Transaction amount")
     currency: str = Field(default="INR", description="Currency code")
     mode: str = Field(default="UPI", description="Transaction mode (UPI, IMPS, NEFT, etc.)")
-    timestamp: Union[str, float] = Field(description="Transaction timestamp (ISO format or epoch seconds)")
+    timestamp: Union[str, float] = Field(description="Transaction timestamp (ISO 8601 UTC format or epoch seconds)")
     device_id: Optional[str] = Field(default=None, description="Device identifier")
     biometrics: Optional[BiometricsData] = Field(default=None, description="Behavioral biometrics")
     ip_address: Optional[str] = Field(default=None, description="IP address")
@@ -87,14 +85,13 @@ class TransactionCheckRequest(BaseModel):
     @field_validator('timestamp')
     @classmethod
     def validate_timestamp(cls, v):
-        """Validate and normalize timestamp to ISO 8601 format."""
-        # Convert Unix epoch to ISO format if needed
-        if isinstance(v, (int, float)):
-            from datetime import datetime, timezone
-            dt = datetime.fromtimestamp(v, tz=timezone.utc)
-            v = dt.isoformat()
-        
+        """Validate and normalize timestamp to ISO 8601 UTC format.
+
+        Accepted inputs include Unix epoch seconds and timezone-aware ISO 8601
+        strings (Z or explicit UTC offsets).
+        """
         try:
+            v = TransactionValidator.normalize_timestamp(v)
             TransactionValidator.validate_timestamp(v)
         except ValidationError as e:
             raise ValueError(e.suggestion) from e
@@ -243,6 +240,7 @@ class HealthCheckResponse(BaseModel):
     uptime_seconds: Optional[float] = Field(default=None, description="Service uptime in seconds")
     requests_processed: Optional[int] = Field(default=None, description="Total requests processed")
     timestamp: Optional[str] = Field(default=None, description="Response timestamp")
+    services_health: Optional[Dict[str, Dict[str, Any]]] = Field(default=None, description="Detailed health stats for registered services")
 
 
 class ModelInfo(BaseModel):
@@ -282,7 +280,9 @@ class ErrorResponse(BaseModel):
 class VoiceAnalysisRequest(BaseModel):
     """Request for voice stress analysis"""
     transaction_id: str = Field(description="Transaction ID for correlation")
-    audio_base64: str = Field(max_length=5_000_000, description="Base64-encoded audio WAV file (max 30 seconds)")
+    # Keep this small so the API accepts only short voice clips and rejects
+    # large uploads before they can consume excessive memory or CPU.
+    audio_base64: str = Field(max_length=500_000, description="Base64-encoded audio WAV file (max 30 seconds)")
     sample_rate: int = Field(default=16000, description="Audio sample rate in Hz")
     
     @field_validator('sample_rate')

@@ -4,8 +4,11 @@ Unit tests for API endpoints
 # Working on API endpoint testing
 
 import pytest
+import asyncio
 from fastapi.testclient import TestClient
+import inspect
 import sys
+import types
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -54,6 +57,16 @@ def _clear_rate_limit_storage():
                 except TypeError:
                     continue
                 return
+
+
+class _RecordingLoop:
+    def __init__(self, results):
+        self.results = list(results)
+        self.calls = []
+
+    async def run_in_executor(self, executor, func, *args):
+        self.calls.append((executor, func, args))
+        return self.results[len(self.calls) - 1]
 
 
 class _FakeBlockchainManager:
@@ -281,6 +294,97 @@ class TestLegalExportSecurity:
         )
 
         assert limited_response.status_code == 429
+
+
+class TestApiModuleFallbacks:
+    def test_module_has_single_helper_definitions(self):
+        source = inspect.getsource(api_main)
+
+        for helper_name in [
+            "_require_legal_export_authorization",
+            "_extract_legal_export_token",
+            "_parse_request_timestamp",
+            "_validate_legal_export_request",
+            "_fallback_compute_risk_score",
+            "_fallback_generate_explanation",
+        ]:
+            assert source.count(f"def {helper_name}(") == 1
+
+        assert source.count("def compute_risk_score(") == 0
+        assert source.count("def generate_explanation(") == 0
+
+    def test_legal_export_helpers_accept_bearer_and_header_tokens(self, monkeypatch):
+        token = "legal-token"
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        now = datetime.now(timezone.utc)
+        iso_timestamp = now.isoformat().replace("+00:00", "Z")
+
+        monkeypatch.setenv("AEGIS_LEGAL_EXPORT_TOKEN_HASH", token_hash)
+
+        assert api_main._extract_legal_export_token(f"Bearer {token}", None) == token
+        assert api_main._extract_legal_export_token(None, token) == token
+
+        parsed_iso = api_main._parse_request_timestamp(iso_timestamp)
+        parsed_epoch = api_main._parse_request_timestamp(str(int(now.timestamp())))
+
+        assert parsed_iso is not None and parsed_iso.tzinfo == timezone.utc
+        assert parsed_epoch is not None and parsed_epoch.tzinfo == timezone.utc
+
+        api_main._require_legal_export_authorization(token)
+        api_main._validate_legal_export_request(f"Bearer {token}", None, iso_timestamp)
+        api_main._validate_legal_export_request(None, token, iso_timestamp)
+
+    def test_fallback_scoring_and_explanation_are_rich(self, monkeypatch):
+        graph = api_main.nx.DiGraph()
+        graph.add_edge("mule_acc_001", "suspect_account_1")
+
+        monkeypatch.setattr(api_main.state, "graph_loaded", True)
+        monkeypatch.setattr(api_main.state, "transaction_graph", graph)
+        monkeypatch.setattr(
+            api_main.state,
+            "account_profiles",
+            {"mule_acc_001": {"avg_transaction_amount": 10000}},
+        )
+
+        result = api_main._fallback_compute_risk_score(
+            {
+                "source_account": "mule_acc_001",
+                "target_account": "suspect_account_1",
+                "amount": 60000,
+            },
+            biometrics={"hold_times": [220, 240], "flight_times": [90, 95]},
+        )
+
+        assert set(result) == {"risk_score", "decision", "confidence", "breakdown"}
+        assert set(result["breakdown"]) == {"graph", "velocity", "behavior", "entropy"}
+        assert 0 <= result["risk_score"] <= 1
+        assert result["breakdown"]["graph"] > 0
+        assert result["breakdown"]["velocity"] > 0
+        assert result["breakdown"]["behavior"] > 0
+
+        explanation = api_main._fallback_generate_explanation(
+            transaction={"source_account": "mule_acc_001", "target_account": "suspect_account_1"},
+            risk_result={
+                "risk_score": 0.82,
+                "decision": "BLOCK",
+                "breakdown": {"graph": 0.7, "velocity": 0.6, "behavior": 0.4, "entropy": 0.5},
+            },
+        )
+
+        assert "HIGH GRAPH RISK" in explanation["explanation"]
+        assert "SOURCE ACCOUNT" in explanation["explanation"]
+        assert "TARGET ACCOUNT" in explanation["explanation"]
+        assert explanation["recommended_action"].startswith("REJECT TRANSACTION")
+
+    def test_model_component_resolution_falls_back_when_imports_fail(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "src.inference.risk_scorer", types.ModuleType("src.inference.risk_scorer"))
+        monkeypatch.setitem(sys.modules, "src.inference.explainer", types.ModuleType("src.inference.explainer"))
+
+        compute, explain, available = api_main._resolve_model_components()
+
+        assert available is False
+        assert compute is api_main._fallback_compute_risk_score
+        assert explain is api_main._fallback_generate_explanation
 
 
 class TestFraudCheckEndpoint:
@@ -682,6 +786,55 @@ class TestCORSandSecurity:
         
         # All should succeed (rate limiting not implemented yet)
         assert all(code == 200 for code in responses)
+
+
+class TestAsyncExplainabilityOffload:
+    def test_transaction_explanation_uses_executor(self, monkeypatch):
+        """Explanation generation should be offloaded from the request thread."""
+        original_requests_processed = state.requests_processed
+        original_decisions = state.decisions.copy()
+        original_total_risk_score = state.total_risk_score
+        original_total_processing_time = state.total_processing_time
+
+        monkeypatch.setattr(api_main, "INNOVATIONS_AVAILABLE", True)
+        monkeypatch.setattr(api_main, "LATERAL_MOVEMENT_AVAILABLE", False)
+
+        try:
+            txn_loop = _RecordingLoop([
+                {
+                    "risk_score": 0.12,
+                    "decision": "ALLOW",
+                    "confidence": 0.91,
+                    "breakdown": {"graph": 0.1, "velocity": 0.1, "behavior": 0.1, "entropy": 0.1},
+                    "lateral_movement_detected": False,
+                },
+                {
+                    "explanation": "generated off thread",
+                    "recommended_action": "monitor",
+                },
+            ])
+            monkeypatch.setattr(api_main.asyncio, "get_running_loop", lambda: txn_loop)
+
+            txn_request = api_main.TransactionCheckRequest(
+                transaction_id="txn-379",
+                source_account="user_1",
+                target_account="merchant_1",
+                amount=25.0,
+                currency="INR",
+                mode="UPI",
+                timestamp="2026-05-28T14:30:00Z",
+            )
+
+            txn_response = asyncio.run(api_main.check_transaction(txn_request))
+
+            assert len(txn_loop.calls) == 2
+            assert txn_loop.calls[1][1].func is api_main.generate_explanation
+            assert txn_response.explanation == "generated off thread"
+        finally:
+            state.requests_processed = original_requests_processed
+            state.decisions = original_decisions
+            state.total_risk_score = original_total_risk_score
+            state.total_processing_time = original_total_processing_time
 
 
 if __name__ == "__main__":

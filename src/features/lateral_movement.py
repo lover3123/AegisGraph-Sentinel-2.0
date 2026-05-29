@@ -1,5 +1,6 @@
 import threading
 from collections import defaultdict, deque
+from typing import Any, Optional
 
 import networkx as nx
 import numpy as np
@@ -26,18 +27,28 @@ class LateralMovementDetector:
         history_size=10,
         std_multiplier=2.0,
         spike_multiplier=3.0,
-        risk_penalty=0.25
+        risk_penalty=0.25,
+        graph_service: Optional[Any] = None,
     ):
         self.history_size = history_size
         self.std_multiplier = std_multiplier
         self.spike_multiplier = spike_multiplier
         self.risk_penalty = risk_penalty
+        self.graph_service = graph_service
 
         runtime_settings = get_settings()
         self.redis_url = runtime_settings.innovations.redis_url
         self.use_redis = REDIS_AVAILABLE and self.redis_url
 
-        if self.use_redis:
+        # Check if graph service is active Neo4j provider
+        self.use_neo4j = False
+        if self.graph_service is not None:
+            # Dynamically check if active
+            self.use_neo4j = getattr(self.graph_service, "is_active", False)
+
+        if self.use_neo4j:
+            print("LateralMovementDetector: Using active Neo4j Graph Database Backend.")
+        elif self.use_redis:
             print("LateralMovementDetector: Connected to Redis Backend for multi-worker scaling.")
             self.redis_client = redis.from_url(self.redis_url, decode_responses=True)
             self._graph_cache = {}
@@ -51,8 +62,14 @@ class LateralMovementDetector:
             )
             self.active_graph = nx.DiGraph()
 
-    def update_graph(self, src_account, dst_account):
+    def update_graph(self, src_account, dst_account, amount: float = 1.0, timestamp: Optional[float] = None):
         """Updates the network topology dynamically across all workers."""
+        if self.graph_service is not None and getattr(self.graph_service, "is_active", False):
+            # Neo4j Active Provider execution
+            t = timestamp or time.time()
+            self.graph_service.add_transaction(src_account, dst_account, amount, t)
+            return
+
         if self.use_redis:
             # Atomic cross-worker edge weight increment plus version bump for cache invalidation.
             pipe = self.redis_client.pipeline(transaction=True)
@@ -68,9 +85,16 @@ class LateralMovementDetector:
                     self.active_graph[src_account][dst_account]['weight'] += 1
                 else:
                     self.active_graph.add_edge(src_account, dst_account, weight=1)
+                if self.active_graph.number_of_nodes() > 10000:
+                    nodes_to_remove = list(self.active_graph.nodes())[:100]
+                    self.active_graph.remove_nodes_from(nodes_to_remove)
 
     def _get_approx_graph(self, account_id, max_hops=2):
         """Reconstructs a bounded local graph around an account (Redis mode)."""
+        if self.graph_service is not None and getattr(self.graph_service, "is_active", False):
+            # Extract subgraph from Neo4j dynamically
+            return self.graph_service.get_approx_subgraph(account_id, max_hops)
+
         if not self.use_redis:
             return self.active_graph
 
@@ -111,7 +135,7 @@ class LateralMovementDetector:
 
     def _calculate_approx_centrality(self, account_id):
         """Calculates localized betweenness centrality safely."""
-        if self.use_redis:
+        if self.use_neo4j or self.use_redis:
             G = self._get_approx_graph(account_id)
         else:
             with self._lock:

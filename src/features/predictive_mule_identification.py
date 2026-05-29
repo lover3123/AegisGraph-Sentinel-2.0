@@ -410,7 +410,6 @@ class PredictiveMuleScorer:
         """
         profession = account_data.profession.lower()
         initial_deposit = features['initial_deposit']
-        age = features['age']
         
         high_risk_professions = ['student', 'unemployed', 'homemaker']
         
@@ -484,6 +483,10 @@ class PredictiveMuleScorer:
             a for a in self.recent_openings
             if a.opening_timestamp > cutoff
         ]
+        
+        # Limit to prevent memory exhaustion
+        if len(self.recent_openings) > self.MAX_HISTORY_SIZE * 10:
+            self.recent_openings = self.recent_openings[-self.MAX_HISTORY_SIZE * 10:]
         
         # Update device history
         device_id = account_data.device_id

@@ -3,7 +3,7 @@ API Input Validation Layer for AegisGraph Sentinel 2.0
 
 Comprehensive validation for:
 - Transaction amounts (positive, max limits, precision)
-- Timestamps (ISO 8601 format, not future, not too old)
+- Timestamps (ISO 8601 UTC format, not future, not too old)
 - Account IDs (format, length, allowed characters)
 - Currency codes (ISO 4217 compliance)
 - Transaction modes (valid types)
@@ -74,6 +74,8 @@ VALID_MODES = {
     "NET_BANKING",
 }
 
+CANONICAL_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
 
 class TransactionValidator:
     """Static validation methods for transaction data."""
@@ -119,27 +121,29 @@ class TransactionValidator:
         Validate transaction timestamp.
 
         Constraints:
-        - Must be ISO 8601 format (YYYY-MM-DDTHH:MM:SSZ)
+        - Must be strict ISO 8601 UTC format (YYYY-MM-DDTHH:MM:SSZ)
         - Must not be in the future (within 60 second tolerance)
         - Must not be older than 90 days
         """
-        try:
-            # Parse ISO 8601 timestamp
-            if timestamp.endswith("Z"):
-                dt = datetime.fromisoformat(timestamp[:-1] + "+00:00")
-            else:
-                dt = datetime.fromisoformat(timestamp)
+        if not isinstance(timestamp, str):
+            raise ValidationError(
+                field="timestamp",
+                value=timestamp,
+                constraint="iso8601_format",
+                suggestion="Timestamp must be in ISO 8601 UTC format (YYYY-MM-DDTHH:MM:SSZ)",
+            )
 
-            # Ensure timezone-aware
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
+        try:
+            dt = datetime.strptime(timestamp, CANONICAL_TIMESTAMP_FORMAT).replace(
+                tzinfo=timezone.utc
+            )
 
         except (ValueError, TypeError) as e:
             raise ValidationError(
                 field="timestamp",
                 value=timestamp,
                 constraint="iso8601_format",
-                suggestion="Timestamp must be in ISO 8601 format (YYYY-MM-DDTHH:MM:SSZ)",
+                suggestion="Timestamp must be in ISO 8601 UTC format (YYYY-MM-DDTHH:MM:SSZ)",
             ) from e
 
         now = datetime.now(timezone.utc)
@@ -163,6 +167,47 @@ class TransactionValidator:
                 constraint="not_too_old",
                 suggestion="Timestamp cannot be older than 90 days",
             )
+
+    @staticmethod
+    def normalize_timestamp(timestamp: Any) -> str:
+        """
+        Normalize a timestamp to canonical ISO 8601 UTC format.
+
+        Accepted inputs:
+        - Unix epoch seconds
+        - timezone-aware ISO 8601 strings
+        """
+        try:
+            if isinstance(timestamp, (int, float)) and not isinstance(timestamp, bool):
+                dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+            elif isinstance(timestamp, str):
+                dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    raise ValidationError(
+                        field="timestamp",
+                        value=timestamp,
+                        constraint="iso8601_format",
+                        suggestion=(
+                            "Timestamp must include timezone information and use "
+                            "ISO 8601 UTC format (YYYY-MM-DDTHH:MM:SSZ)"
+                        ),
+                    )
+            else:
+                raise TypeError("Unsupported timestamp type")
+        except (ValueError, TypeError) as e:
+            if isinstance(e, ValidationError):
+                raise
+            raise ValidationError(
+                field="timestamp",
+                value=timestamp,
+                constraint="iso8601_format",
+                suggestion=(
+                    "Timestamp must be in ISO 8601 UTC format "
+                    "(YYYY-MM-DDTHH:MM:SSZ) or be a Unix epoch value"
+                ),
+            ) from e
+
+        return dt.astimezone(timezone.utc).strftime(CANONICAL_TIMESTAMP_FORMAT)
 
     @staticmethod
     def validate_account_id(account_id: str, field_name: str = "account_id") -> None:
@@ -274,54 +319,68 @@ class RateLimiter:
         account_limit: int = 100,  # per minute
         api_key_limit: int = 1000,  # per minute
         ip_limit: int = 500,  # per minute
+        max_entries: int = 10_000,  # max tracked identifiers per bucket
     ):
         self.account_limit = account_limit
         self.api_key_limit = api_key_limit
         self.ip_limit = ip_limit
+        self.max_entries = max_entries
 
-        # Tracking: {identifier: (request_count, window_start_time)}
-        self.account_requests: Dict[str, Tuple[int, datetime]] = defaultdict(
-            lambda: (0, datetime.now(timezone.utc))
-        )
-        self.apikey_requests: Dict[str, Tuple[int, datetime]] = defaultdict(
-            lambda: (0, datetime.now(timezone.utc))
-        )
-        self.ip_requests: Dict[str, Tuple[int, datetime]] = defaultdict(
-            lambda: (0, datetime.now(timezone.utc))
-        )
+        # Use OrderedDict to preserve insertion order for LRU eviction
+        from collections import OrderedDict
+        self.account_requests: "OrderedDict[str, Tuple[int, datetime]]" = OrderedDict()
+        self.apikey_requests: "OrderedDict[str, Tuple[int, datetime]]" = OrderedDict()
+        self.ip_requests: "OrderedDict[str, Tuple[int, datetime]]" = OrderedDict()
 
         self._lock = threading.RLock()
+
+        # Initialize empty entries lazily in _check_limit
+
 
     def _check_limit(
         self,
         identifier: str,
-        tracking_dict: Dict[str, Tuple[int, datetime]],
+        tracking_dict: "OrderedDict[str, Tuple[int, datetime]]",
         limit: int,
     ) -> Tuple[bool, Optional[int]]:
         """
-        Check if identifier is within rate limit.
+        Check if identifier is within rate limit using an LRU eviction policy.
 
         Returns:
             (is_allowed, retry_after_seconds)
         """
         now = datetime.now(timezone.utc)
-        count, window_start = tracking_dict.get(identifier, (0, now))
 
-        # Check if we're in a new minute
-        if (now - window_start).total_seconds() >= 60:
-            # Reset window
+        # Retrieve current entry or initialize a new one
+        entry = tracking_dict.get(identifier)
+        if entry is None:
+            # New identifier – start a window with count 1
             tracking_dict[identifier] = (1, now)
+            # Enforce max size via LRU eviction (pop oldest)
+            if len(tracking_dict) > self.max_entries:
+                # popitem(last=False) removes the first inserted (least recently used)
+                tracking_dict.popitem(last=False)
             return True, None
 
-        # Still in current window
+        count, window_start = entry
+
+        # If window has expired, reset count and timestamp
+        if (now - window_start).total_seconds() >= 60:
+            tracking_dict[identifier] = (1, now)
+            # Move to end to mark recent use
+            tracking_dict.move_to_end(identifier)
+            return True, None
+
+        # Within the same minute window
         if count < limit:
             tracking_dict[identifier] = (count + 1, window_start)
+            tracking_dict.move_to_end(identifier)
             return True, None
         else:
-            # Rate limited
-            retry_after = int(
-                60 - (now - window_start).total_seconds() + 1
-            )
+            # Rate limited – calculate retry after seconds
+            retry_after = int(60 - (now - window_start).total_seconds() + 1)
+            # Move to end to keep LRU ordering consistent
+            tracking_dict.move_to_end(identifier)
             return False, retry_after
 
     def check_account_limit(self, account_id: str) -> Tuple[bool, Optional[int]]:

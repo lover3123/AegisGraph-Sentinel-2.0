@@ -1,11 +1,16 @@
 """Regression tests for production-readiness hardening."""
 
 import asyncio
+import importlib.util
 import hashlib
 import json
+import tempfile
+import sys
 from pathlib import Path
 from unittest.mock import Mock
+import types
 
+import networkx as nx
 import pytest
 
 from src.api import main as api_main
@@ -219,6 +224,113 @@ def test_scoring_recovers_when_lateral_analysis_raises(monkeypatch):
     assert "lateral_movement" not in result["breakdown"]
 
 
+class TestGraphPatternAnalysisFallback:
+    def _load_graph_fallback_module(self, monkeypatch):
+        for module_name in (
+            "src.features.voice_stress_analysis",
+            "src.features.predictive_mule_identification",
+            "src.features.honeypot_escrow",
+            "src.features.blockchain_evidence",
+            "src.features.aegis_oracle_explainer",
+            "src.features.lateral_movement",
+        ):
+            monkeypatch.setitem(sys.modules, module_name, types.ModuleType(module_name))
+
+        module_path = Path(api_main.__file__)
+        spec = importlib.util.spec_from_file_location(
+            "src.api.main_graph_fallback_test",
+            module_path,
+        )
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        return module
+
+    def _base_transaction(self, source_account="acct_src", target_account="acct_dst"):
+        return {
+            "transaction_id": "txn_graph_001",
+            "source_account": source_account,
+            "target_account": target_account,
+            "amount": 100.0,
+            "currency": "INR",
+            "mode": "UPI",
+            "timestamp": "2026-02-26T14:30:00Z",
+        }
+
+    def _configure_graph_state(self, monkeypatch, module, graph):
+        monkeypatch.setattr(module.state, "graph_loaded", True)
+        monkeypatch.setattr(module.state, "transaction_graph", graph)
+        monkeypatch.setattr(module.state, "mule_accounts", set())
+        monkeypatch.setattr(module.state, "account_profiles", {})
+
+    def test_linear_chain_adds_graph_risk(self, monkeypatch):
+        fallback_main = self._load_graph_fallback_module(monkeypatch)
+        graph = nx.DiGraph()
+        graph.add_edges_from([("acct_src", "acct_b"), ("acct_b", "acct_c"), ("acct_c", "acct_d")])
+        self._configure_graph_state(monkeypatch, fallback_main, graph)
+
+        result = fallback_main.compute_risk_score(self._base_transaction())
+
+        assert result["breakdown"]["graph"] == pytest.approx(0.2)
+        assert result["risk_score"] > 0.0
+
+    def test_cyclic_graph_exits_safely(self, monkeypatch):
+        fallback_main = self._load_graph_fallback_module(monkeypatch)
+        graph = nx.DiGraph()
+        graph.add_edges_from([("acct_src", "acct_b"), ("acct_b", "acct_c"), ("acct_c", "acct_src")])
+        self._configure_graph_state(monkeypatch, fallback_main, graph)
+
+        result = fallback_main.compute_risk_score(self._base_transaction())
+
+        assert result["risk_score"] >= 0.0
+        assert result["breakdown"]["graph"] == pytest.approx(0.0)
+
+    def test_branching_graph_remains_stable(self, monkeypatch):
+        fallback_main = self._load_graph_fallback_module(monkeypatch)
+        graph = nx.DiGraph()
+        graph.add_edges_from([("acct_src", "acct_b"), ("acct_src", "acct_c")])
+        self._configure_graph_state(monkeypatch, fallback_main, graph)
+
+        result = fallback_main.compute_risk_score(self._base_transaction())
+
+        assert result["risk_score"] >= 0.0
+        assert result["breakdown"]["graph"] == pytest.approx(0.0)
+
+    def test_missing_source_node_does_not_raise(self, monkeypatch):
+        fallback_main = self._load_graph_fallback_module(monkeypatch)
+        graph = nx.DiGraph()
+        graph.add_edge("acct_other", "acct_next")
+        self._configure_graph_state(monkeypatch, fallback_main, graph)
+
+        result = fallback_main.compute_risk_score(self._base_transaction())
+
+        assert result["risk_score"] >= 0.0
+        assert result["breakdown"]["graph"] == pytest.approx(0.0)
+
+    def test_malformed_graph_logs_warning_and_returns_score(self, monkeypatch):
+        fallback_main = self._load_graph_fallback_module(monkeypatch)
+
+        class BrokenGraph(nx.DiGraph):
+            def successors(self, node):
+                raise RuntimeError("graph backend unavailable")
+
+        graph = BrokenGraph()
+        graph.add_node("acct_src")
+        self._configure_graph_state(monkeypatch, fallback_main, graph)
+
+        warning_mock = Mock()
+        monkeypatch.setattr(fallback_main._api_logger, "warning", warning_mock)
+
+        result = fallback_main.compute_risk_score(self._base_transaction())
+
+        assert result["risk_score"] >= 0.0
+        warning_mock.assert_called()
+        assert any(
+            kwargs.get("event_type") == "graph_pattern_analysis_error"
+            for _, kwargs in warning_mock.call_args_list
+        )
+
+
 def test_startup_disk_reads_use_thread_pool(monkeypatch, tmp_path):
     class DummyLogger:
         def info(self, *args, **kwargs):
@@ -301,6 +413,40 @@ class _BoomVoiceAnalyzer:
         raise RuntimeError("voice internal secret")
 
 
+class _VoiceAnalyzerStub:
+    def __init__(self, result=None):
+        self.result = result or {
+            "stress_score": 12.5,
+            "classification": "NORMAL",
+            "confidence": 0.91,
+            "features": {
+                "f0_mean": 120.0,
+                "f0_std": 8.0,
+                "f0_range": 22.0,
+                "jitter": 0.01,
+                "shimmer": 0.02,
+                "speech_rate": 4.5,
+                "prosody_entropy": 1.2,
+                "snr": 28.0,
+                "background_voices": 0,
+            },
+            "recommended_action": "PROCEED",
+        }
+        self.calls = []
+
+    def analyze_voice(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        return self.result
+
+
+def _valid_voice_payload(audio_base64="dGVzdA=="):
+    return {
+        "transaction_id": "txn_voice",
+        "audio_base64": audio_base64,
+        "sample_rate": 16000,
+    }
+
+
 class _BoomMuleScorer:
     def score_account_opening(self, *args, **kwargs):
         raise RuntimeError("scoring internal secret")
@@ -371,3 +517,95 @@ def test_public_api_internal_errors_are_sanitized(
     assert body["error"]["code"] == "INTERNAL_ERROR"
     assert body["error"]["message"] == "Internal Server Error"
     assert secret not in response.text
+
+
+def test_voice_analysis_accepts_small_payload(api_client, monkeypatch):
+    monkeypatch.setattr(api_main, "INNOVATIONS_AVAILABLE", True)
+    stub = _VoiceAnalyzerStub()
+    monkeypatch.setattr(api_main.state, "voice_analyzer", stub, raising=False)
+
+    response = api_client.post("/api/v1/voice/analyze", json=_valid_voice_payload())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["transaction_id"] == "txn_voice"
+    assert body["classification"] == "NORMAL"
+    assert stub.calls
+
+
+def test_voice_analysis_rejects_oversized_base64_payload(api_client):
+    response = api_client.post(
+        "/api/v1/voice/analyze",
+        json=_valid_voice_payload(audio_base64="A" * 500_004),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_voice_analysis_rejects_oversized_decoded_audio(api_client, monkeypatch):
+    monkeypatch.setattr(api_main, "INNOVATIONS_AVAILABLE", True)
+    monkeypatch.setattr(api_main.state, "voice_analyzer", _VoiceAnalyzerStub(), raising=False)
+
+    response = api_client.post(
+        "/api/v1/voice/analyze",
+        json=_valid_voice_payload(audio_base64="A" * 470_000),
+    )
+
+    assert response.status_code == 413
+    assert response.json()["error"]["message"] == "Audio payload too large"
+
+
+def test_voice_analysis_rejects_malformed_base64(api_client, monkeypatch):
+    monkeypatch.setattr(api_main, "INNOVATIONS_AVAILABLE", True)
+    monkeypatch.setattr(api_main.state, "voice_analyzer", _VoiceAnalyzerStub(), raising=False)
+
+    response = api_client.post(
+        "/api/v1/voice/analyze",
+        json=_valid_voice_payload(audio_base64="%%%INVALID%%%"),
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["message"] == "Invalid base64 audio payload"
+
+
+def test_voice_analysis_cleans_temp_file_on_failure(api_client, monkeypatch, tmp_path):
+    monkeypatch.setattr(api_main, "INNOVATIONS_AVAILABLE", True)
+    monkeypatch.setattr(api_main.state, "voice_analyzer", _BoomVoiceAnalyzer(), raising=False)
+
+    temp_file_path = tmp_path / "voice-upload.wav"
+
+    class _TempFileContext:
+        def __enter__(self):
+            self.handle = temp_file_path.open("wb")
+            return self.handle
+
+        def __exit__(self, exc_type, exc, tb):
+            self.handle.close()
+            return False
+
+    monkeypatch.setattr(
+        tempfile,
+        "NamedTemporaryFile",
+        lambda *args, **kwargs: _TempFileContext(),
+    )
+
+    response = api_client.post("/api/v1/voice/analyze", json=_valid_voice_payload())
+
+    assert response.status_code == 500
+    assert not temp_file_path.exists()
+
+
+def test_voice_analysis_rate_limit_enforced(api_client, monkeypatch):
+    if not api_main.SLOWAPI_AVAILABLE:
+        pytest.skip("SlowAPI is not installed")
+
+    monkeypatch.setattr(api_main, "INNOVATIONS_AVAILABLE", True)
+    monkeypatch.setattr(api_main.state, "voice_analyzer", _VoiceAnalyzerStub(), raising=False)
+
+    statuses = []
+    for _ in range(11):
+        response = api_client.post("/api/v1/voice/analyze", json=_valid_voice_payload())
+        statuses.append(response.status_code)
+
+    assert 429 in statuses

@@ -404,7 +404,10 @@ def compute_risk_score(
         # and masking all topology signals (fix for Issue #133).
 
         # Check graph topology patterns
-        G = state.transaction_graph
+        if hasattr(state.transaction_graph, "is_active") and state.transaction_graph.is_active:
+            G = state.transaction_graph.get_approx_subgraph(source_account, max_hops=2)
+        else:
+            G = state.transaction_graph
         
         if source_account in G.nodes:
             # Analyze source account patterns
@@ -468,50 +471,57 @@ def compute_risk_score(
     lateral_movement_detected = False
     lateral_movement_reason = ""
     
-    if state.graph_loaded and state.transaction_graph and source_account in state.transaction_graph.nodes:
-        G = state.transaction_graph
-        try:
-            if centrality is None:
-                centrality = nx.betweenness_centrality(G, k=min(100, G.number_of_nodes()))
-            if source_account in centrality:
-                current_score = centrality[source_account]
-                
-                # Get or initialize baseline
-                if source_account not in state.centrality_baseline:
-                    state.centrality_baseline[source_account] = []
-                
-                baseline_history = state.centrality_baseline[source_account]
-                
-                if len(baseline_history) >= 3:
-                    baseline_avg = np.mean(baseline_history)
-                    baseline_std = np.std(baseline_history) if len(baseline_history) > 1 else 0.001
+    if state.graph_loaded and state.transaction_graph:
+        if hasattr(state.transaction_graph, "is_active") and state.transaction_graph.is_active:
+            G = state.transaction_graph.get_approx_subgraph(source_account, max_hops=2)
+            has_node = G.has_node(source_account)
+        else:
+            G = state.transaction_graph
+            has_node = source_account in G.nodes if hasattr(G, "nodes") else False
+
+        if has_node:
+            try:
+                if centrality is None:
+                    centrality = nx.betweenness_centrality(G, k=min(100, G.number_of_nodes()))
+                if source_account in centrality:
+                    current_score = centrality[source_account]
                     
-                    # Spike detection: configurable thresholds (from thresholds.yaml)
-                    spike_threshold = max(
-                        baseline_avg + config_defaults.DEFAULT_LATERAL_MOVEMENT_STD_MULTIPLIER * baseline_std,
-                        baseline_avg * config_defaults.DEFAULT_LATERAL_MOVEMENT_THRESHOLD_MULTIPLIER
-                    )
+                    # Get or initialize baseline
+                    if source_account not in state.centrality_baseline:
+                        state.centrality_baseline[source_account] = []
                     
-                    if current_score > spike_threshold and baseline_avg > 0:
-                        lateral_movement_detected = True
-                        lateral_movement_reason = f"Lateral movement detected: {source_account} betweenness centrality spiked from baseline {baseline_avg:.4f} to {current_score:.4f} (MITRE ATT&CK TA0008)"
-                        graph_risk += config_defaults.DEFAULT_LATERAL_MOVEMENT_RISK_INCREMENT
-                        _inference_logger.warning(
-                            f"Lateral movement detected for {source_account}",
-                            event_type="lateral_movement",
-                            metadata={
-                                "baseline_avg": baseline_avg,
-                                "current_score": current_score,
-                            },
+                    baseline_history = state.centrality_baseline[source_account]
+                    
+                    if len(baseline_history) >= 3:
+                        baseline_avg = np.mean(baseline_history)
+                        baseline_std = np.std(baseline_history) if len(baseline_history) > 1 else 0.001
+                        
+                        # Spike detection: configurable thresholds (from thresholds.yaml)
+                        spike_threshold = max(
+                            baseline_avg + config_defaults.DEFAULT_LATERAL_MOVEMENT_STD_MULTIPLIER * baseline_std,
+                            baseline_avg * config_defaults.DEFAULT_LATERAL_MOVEMENT_THRESHOLD_MULTIPLIER
                         )
-                
-                # Update baseline (rolling window)
-                baseline_history.append(current_score)
-                if len(baseline_history) > state.centrality_window_size:
-                    baseline_history.pop(0)
+                        
+                        if current_score > spike_threshold and baseline_avg > 0:
+                            lateral_movement_detected = True
+                            lateral_movement_reason = f"Lateral movement detected: {source_account} betweenness centrality spiked from baseline {baseline_avg:.4f} to {current_score:.4f} (MITRE ATT&CK TA0008)"
+                            graph_risk += config_defaults.DEFAULT_LATERAL_MOVEMENT_RISK_INCREMENT
+                            _inference_logger.warning(
+                                f"Lateral movement detected for {source_account}",
+                                event_type="lateral_movement",
+                                metadata={
+                                    "baseline_avg": baseline_avg,
+                                    "current_score": current_score,
+                                },
+                            )
                     
-        except Exception as e:
-            pass
+                    # Update baseline (rolling window)
+                    baseline_history.append(current_score)
+                    if len(baseline_history) > state.centrality_window_size:
+                        baseline_history.pop(0)
+                        
+            except Exception as e:
+                pass
     
     # 2. VELOCITY RISK (20% weight)
     velocity_risk = 0.0
