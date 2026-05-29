@@ -1,5 +1,5 @@
 import threading
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from typing import Any, Optional
 
 import networkx as nx
@@ -57,6 +57,7 @@ class LateralMovementDetector:
             print("LateralMovementDetector: Using Thread-Safe In-Memory Backend (Single Worker).")
             # In-memory fallbacks protected by a Mutex lock
             self._lock = threading.Lock()
+            self._node_access_order = OrderedDict()
             self.centrality_history = defaultdict(
                 lambda: deque(maxlen=self.history_size)
             )
@@ -85,9 +86,28 @@ class LateralMovementDetector:
                     self.active_graph[src_account][dst_account]['weight'] += 1
                 else:
                     self.active_graph.add_edge(src_account, dst_account, weight=1)
-                if self.active_graph.number_of_nodes() > 10000:
-                    nodes_to_remove = list(self.active_graph.nodes())[:100]
-                    self.active_graph.remove_nodes_from(nodes_to_remove)
+                self._touch_node(src_account)
+                self._touch_node(dst_account)
+                self._prune_lru_nodes()
+
+    def _touch_node(self, node_id):
+        """Mark a node as recently used for in-memory graph retention."""
+        self._node_access_order[node_id] = None
+        self._node_access_order.move_to_end(node_id)
+
+    def _prune_lru_nodes(self, max_nodes: int = 10000):
+        """Drop the least-recently used nodes when the in-memory graph grows too large."""
+        overflow = self.active_graph.number_of_nodes() - max_nodes
+        if overflow <= 0:
+            return
+
+        nodes_to_remove = list(self._node_access_order.keys())[:overflow]
+        if not nodes_to_remove:
+            return
+
+        self.active_graph.remove_nodes_from(nodes_to_remove)
+        for node in nodes_to_remove:
+            self._node_access_order.pop(node, None)
 
     def _get_approx_graph(self, account_id, max_hops=2):
         """Reconstructs a bounded local graph around an account (Redis mode)."""
