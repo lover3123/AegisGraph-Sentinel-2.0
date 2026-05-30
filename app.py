@@ -234,17 +234,21 @@ st.markdown("""
         display: flex;
         justify-content: space-between;
         align-items: center;
-        animation: slideIn 0.3s ease-out forwards;
-        transition: transform 0.2s;
     }
-    .alert-card:hover {
-        transform: translateX(5px);
-        background: rgba(30, 41, 59, 0.9);
-        border: 1px solid rgba(255, 255, 255, 0.2);
-    }
-    @keyframes slideIn {
-        from { opacity: 0; transform: translateX(-20px); }
-        to { opacity: 1; transform: translateX(0); }
+    @media (prefers-reduced-motion: no-preference) {
+        .alert-card {
+            animation: slideIn 0.3s ease-out forwards;
+            transition: transform 0.2s;
+        }
+        .alert-card:hover {
+            transform: translateX(5px);
+            background: rgba(30, 41, 59, 0.9);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateX(-20px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
     }
     .severity-badge {
         padding: 4px 10px;
@@ -256,11 +260,14 @@ st.markdown("""
     .severity-Low { background: rgba(16, 185, 129, 0.2); color: #10b981; border: 1px solid #10b981; }
     .severity-Medium { background: rgba(245, 158, 11, 0.2); color: #f59e0b; border: 1px solid #f59e0b; }
     .severity-High { background: rgba(249, 115, 22, 0.2); color: #f97316; border: 1px solid #f97316; }
-    .severity-Critical { background: rgba(239, 68, 68, 0.2); color: #ef4444; border: 1px solid #ef4444; animation: pulse 2s infinite; }
-    @keyframes pulse {
-        0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
-        70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
-        100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+    .severity-Critical { background: rgba(239, 68, 68, 0.2); color: #ef4444; border: 1px solid #ef4444; }
+    @media (prefers-reduced-motion: no-preference) {
+        .severity-Critical { animation: pulse 2s infinite; }
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+            70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+        }
     }
     .alert-time { font-family: monospace; color: #94a3b8; font-size: 0.85rem; }
     .alert-title { font-weight: 600; color: #f1f5f9; margin: 0 12px; flex-grow: 1; }
