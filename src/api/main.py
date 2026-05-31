@@ -24,9 +24,13 @@ from typing import Any, Dict, List, Optional
 import networkx as nx
 import numpy as np
 import uvicorn
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+
+from .websocket_manager import WebSocketManager
+
+ws_manager = WebSocketManager()
 
 try:
     _slowapi = import_module("slowapi")
@@ -1617,10 +1621,26 @@ async def lifespan(app: FastAPI):
     lifecycle_manager.register_shutdown("close_neo4j_provider", _close_neo4j_provider)
     lifecycle_manager.register_shutdown("stop_watchdog", watchdog.stop)
 
+    async def _stale_cleanup_loop():
+        try:
+            while True:
+                await asyncio.sleep(15)
+                await ws_manager.cleanup_stale_connections()
+        except asyncio.CancelledError:
+            pass
+            
+    stale_cleanup_task = asyncio.create_task(_stale_cleanup_loop())
+
     await lifecycle_manager.startup()
     try:
         yield
     finally:
+        stale_cleanup_task.cancel()
+        try:
+            await stale_cleanup_task
+        except asyncio.CancelledError:
+            pass
+
         await lifecycle_manager.shutdown()
 
 # Initialize FastAPI app
@@ -2163,6 +2183,27 @@ if settings.runtime.debug:
             return {'honeypot_id': hp.honeypot_id, 'status': hp.status.value}
         except Exception as e:
             _raise_internal_server_error("Debug honeypot activation", e)
+
+@app.websocket("/api/v1/fraud/stream/{client_id}")
+async def fraud_stream_websocket(websocket: WebSocket, client_id: str):
+    """
+    Realtime fraud monitoring stream.
+    Accepts WebSocket connections and streams fraud decisions.
+    Requires periodic 'ping' messages as heartbeats.
+    """
+    accepted = await ws_manager.connect(websocket, client_id)
+    if not accepted:
+        return
+        
+    try:
+        while True:
+            data = await websocket.receive_text()
+            if data.strip().lower() == "ping":
+                await ws_manager.heartbeat(client_id)
+                await websocket.send_text("pong")
+    except WebSocketDisconnect:
+        await ws_manager.disconnect(client_id)
+
 @app.post(
     "/api/v1/fraud/batch",
     tags=["Fraud Detection"],
