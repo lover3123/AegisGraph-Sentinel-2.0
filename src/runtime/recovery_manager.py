@@ -85,21 +85,31 @@ class RecoveryManager:
             },
         )
 
-        try:
-            res = callback()
-            if inspect.isawaitable(res):
-                await res
-            self._logger.info(
-                f"Recovery callback executed successfully for service: {name}",
-                event_type="recovery_attempt_success",
-                metadata={"service": name},
-            )
-            return True
-        except Exception as exc:
-            self._logger.error(
-                f"Recovery callback failed for service: {name}: {exc}",
-                event_type="recovery_attempt_failed",
-                metadata={"service": name, "error": str(exc)},
-            )
-            self.health_monitor.mark_failed(name, error=f"Recovery failed: {exc}")
-            return False
+        import asyncio
+
+        async def run_callback_safely():
+            try:
+                res = callback()
+                if inspect.isawaitable(res):
+                    await res
+                self._logger.info(
+                    f"Recovery callback executed successfully for service: {name}",
+                    event_type="recovery_attempt_success",
+                    metadata={"service": name},
+                )
+            except Exception as exc:
+                self._logger.error(
+                    f"Recovery callback failed for service: {name}: {exc}",
+                    event_type="recovery_attempt_failed",
+                    metadata={"service": name, "error": str(exc)},
+                )
+                self.health_monitor.mark_failed(name, error=f"Recovery failed: {exc}")
+
+       
+        asyncio.create_task(run_callback_safely())
+        return True
+      
+
+
+
+        
