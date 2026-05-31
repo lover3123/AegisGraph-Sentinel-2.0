@@ -16,6 +16,8 @@ from collections import defaultdict
 from typing import Tuple, Optional, List, Dict, Any
 import threading
 import logging
+from fastapi import Request, Header, HTTPException
+import hashlib
 
 logger = logging.getLogger(__name__)
 
@@ -369,6 +371,7 @@ class RateLimiter:
         identifier: str,
         tracking_dict: "OrderedDict[str, Tuple[int, datetime]]",
         limit: int,
+        limit_override: Optional[int] = None,
     ) -> Tuple[bool, Optional[int]]:
         """
         Check if identifier is within rate limit using an LRU eviction policy.
@@ -377,6 +380,7 @@ class RateLimiter:
             (is_allowed, retry_after_seconds)
         """
         now = datetime.now(timezone.utc)
+        effective_limit = limit_override if limit_override is not None else limit
 
         # Retrieve current entry or initialize a new one
         entry = tracking_dict.get(identifier)
@@ -400,7 +404,7 @@ class RateLimiter:
             return True, None
 
         # Within the same minute window
-        if count < limit:
+        if count < effective_limit:
             tracking_dict[identifier] = (count + 1, window_start)
             tracking_dict.move_to_end(identifier)
             self._prune_expired(tracking_dict, now)
@@ -413,24 +417,24 @@ class RateLimiter:
             self._prune_expired(tracking_dict, now)
             return False, retry_after
 
-    def check_account_limit(self, account_id: str) -> Tuple[bool, Optional[int]]:
+    def check_account_limit(self, account_id: str, limit_override: Optional[int] = None) -> Tuple[bool, Optional[int]]:
         """Check if account is within rate limit."""
         with self._lock:
             return self._check_limit(
-                account_id, self.account_requests, self.account_limit
+                account_id, self.account_requests, self.account_limit, limit_override
             )
 
-    def check_api_key_limit(self, api_key: str) -> Tuple[bool, Optional[int]]:
+    def check_api_key_limit(self, api_key: str, limit_override: Optional[int] = None) -> Tuple[bool, Optional[int]]:
         """Check if API key is within rate limit."""
         with self._lock:
             return self._check_limit(
-                api_key, self.apikey_requests, self.api_key_limit
+                api_key, self.apikey_requests, self.api_key_limit, limit_override
             )
 
-    def check_ip_limit(self, ip_address: str) -> Tuple[bool, Optional[int]]:
+    def check_ip_limit(self, ip_address: str, limit_override: Optional[int] = None) -> Tuple[bool, Optional[int]]:
         """Check if IP is within rate limit."""
         with self._lock:
-            return self._check_limit(ip_address, self.ip_requests, self.ip_limit)
+            return self._check_limit(ip_address, self.ip_requests, self.ip_limit, limit_override)
 
     def reset(self):
         """Reset all tracking data (useful for testing)."""
@@ -457,3 +461,40 @@ def reset_rate_limiter():
     global _rate_limiter
     if _rate_limiter is not None:
         _rate_limiter.reset()
+
+class StrictRateLimit:
+    """FastAPI Dependency to enforce strict endpoint-specific LRU rate limits."""
+    
+    def __init__(self, ip_limit: Optional[int] = None, api_key_limit: Optional[int] = None):
+        self.ip_limit = ip_limit
+        self.api_key_limit = api_key_limit
+        
+    async def __call__(
+        self, 
+        request: Request, 
+        x_api_key: Optional[str] = Header(None, alias="X-API-Key")
+    ):
+        limiter = get_rate_limiter()
+        
+        # Enforce IP Limit
+        if self.ip_limit is not None:
+            client_ip = request.client.host if request.client else "unknown"
+            allowed, retry = limiter.check_ip_limit(client_ip, limit_override=self.ip_limit)
+            if not allowed:
+                raise HTTPException(
+                    status_code=429,
+                    detail="Too Many Requests from this IP",
+                    headers={"Retry-After": str(retry)}
+                )
+                
+        # Enforce API Key Limit
+        if self.api_key_limit is not None and x_api_key:
+            key_hash = hashlib.sha256(x_api_key.encode("utf-8")).hexdigest()
+            allowed, retry = limiter.check_api_key_limit(key_hash, limit_override=self.api_key_limit)
+            if not allowed:
+                raise HTTPException(
+                    status_code=429,
+                    detail="Too Many Requests for this API Key",
+                    headers={"Retry-After": str(retry)}
+                )
+

@@ -103,6 +103,7 @@ from .schemas import (
     HoneypotStatus,
 )
 from .security import require_api_key
+from .validators import StrictRateLimit
 
 
 INNOVATIONS_AVAILABLE = False
@@ -1737,7 +1738,7 @@ async def get_stats():
     tags=["Fraud Detection"],
     summary="Check transaction for fraud",
     description="Analyze a single transaction for fraud risk using HTGNN and behavioral biometrics",
-    dependencies=[Depends(require_api_key)]
+    dependencies=[Depends(require_api_key), Depends(StrictRateLimit(ip_limit=60, api_key_limit=300))]
 )
 async def check_transaction(request: TransactionCheckRequest):
     """
@@ -2167,7 +2168,7 @@ if settings.runtime.debug:
     tags=["Fraud Detection"],
     summary="Check multiple transactions",
     description="Batch processing of multiple transactions for fraud detection",
-    dependencies=[Depends(require_api_key)]
+    dependencies=[Depends(require_api_key), Depends(StrictRateLimit(ip_limit=10, api_key_limit=50))]
 )
 async def check_batch_transactions(request: BatchTransactionRequest):
     """
@@ -2273,10 +2274,9 @@ async def get_model_info():
     response_model=VoiceAnalysisResponse,
     tags=["Innovation - Voice Stress"],
     summary="Analyze voice stress during transaction",
-    description="Innovation 5: Detects phone coercion through acoustic stress analysis",
-    dependencies=[Depends(require_api_key)]
+    description="Innovation 5: Real-time voice stress analysis to detect coercion or AI generation",
+    dependencies=[Depends(require_api_key), Depends(StrictRateLimit(ip_limit=5, api_key_limit=20))]
 )
-@limiter.limit("10/minute")
 async def analyze_voice(request: Request, request_body: VoiceAnalysisRequest):
     """
     Analyze voice recording for stress and coercion indicators
