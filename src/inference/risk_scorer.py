@@ -23,7 +23,7 @@ from ..models.risk_model import FraudDetectionModel
 from ..features.velocity_calculator import VelocityCalculator, Transaction
 from ..features.behavioral_biometrics import analyze_keystroke_data
 from ..features.entropy_calculator import compute_entropy_risk_score
-from ..utils.helpers import load_thresholds
+from ..utils.helpers import get_device, load_thresholds
 from ..scoring import ThresholdConfig, RiskScorer as CentralRiskScorer
 from ..observability import get_logger
 from ..config import defaults as config_defaults
@@ -51,7 +51,8 @@ class RiskScorer:
     ):
         self.model = model
         self.config = config
-        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        configured_device = config.get('model', {}).get('device')
+        self.device = get_device(str(device) if device is not None else configured_device)
         
         self.model.to(self.device)
         self.model.eval()

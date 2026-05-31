@@ -123,15 +123,34 @@ def get_device(device: Optional[str] = None) -> torch.device:
     Returns:
         torch.device
     """
-    if device is not None:
-        return torch.device(device)
-    
+    requested_device = device.strip().lower() if isinstance(device, str) else device
+
+    if requested_device == 'cpu':
+        return torch.device('cpu')
+
+    if requested_device == 'cuda' and torch.cuda.is_available():
+        return torch.device('cuda')
+
+    if (
+        requested_device == 'mps'
+        and hasattr(torch.backends, 'mps')
+        and torch.backends.mps.is_available()
+    ):
+        return torch.device('mps')
+
+    if requested_device in {'cuda', 'mps'}:
+        logging.getLogger(__name__).warning(
+            "Requested %s device is unavailable; falling back to best available device",
+            requested_device,
+        )
+    elif requested_device is not None:
+        raise ValueError(f"Unsupported torch device: {device!r}")
+
     if torch.cuda.is_available():
         return torch.device('cuda')
-    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
         return torch.device('mps')
-    else:
-        return torch.device('cpu')
+    return torch.device('cpu')
 
 
 def format_time(seconds: float) -> str:
